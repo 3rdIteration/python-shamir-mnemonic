@@ -7,13 +7,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install poetry
-        run: pipx install poetry
       - name: Setup python for ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: poetry install --only=dev
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .[cli]
+          python -m pip install bip32utils pytest black isort
       - name: Run style check
-        run: poetry run make style_check
+        run: make style_check

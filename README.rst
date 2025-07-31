@@ -43,16 +43,15 @@ With pip from PyPI:
 
 From local checkout for development:
 
-Install the [Poetry](https://python-poetry.org/) tool, checkout
-`python-shamir-mnemonic` from git, and enter the poetry shell:
+Create a virtual environment and install the package from a local checkout:
 
 .. code-block:: console
 
-    $ pip3 install poetry
     $ git clone https://github.com/trezor/python-shamir-mnemonic
     $ cd python-shamir-mnemonic
-    $ poetry install
-    $ poetry shell
+    $ python3 -m venv venv
+    $ . venv/bin/activate
+    (venv) $ pip install -e .[cli]
 
 CLI usage
 ---------
