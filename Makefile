@@ -1,12 +1,11 @@
 PYTHON=python3
-POETRY=poetry
 
 
 build:
-	$(POETRY) build
+	$(PYTHON) -m build
 
 install:
-	$(POETRY) install
+	$(PYTHON) -m pip install .
 
 clean: clean-build clean-pyc clean-test ## remove all build, test, coverage and Python artifacts
 
