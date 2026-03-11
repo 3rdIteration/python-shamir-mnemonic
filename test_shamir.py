@@ -373,7 +373,8 @@ def test_rework_from_stored_wrong_entropy_creates_divergent_shares():
 
     # --- Buggy implementation generates NEW shares from stored wrong entropy ---
     # This is what generateMnemonics does: fresh encryption from the entropy.
-    # The extendable flag is hardcoded False and salt is always empty in the buggy impl.
+    # The buggy implementation encrypts with empty salt (extendable=True internally)
+    # but labels the resulting shares as non-extendable (extendable=False in metadata).
     ems_from_wrong_entropy = shamir.EncryptedMasterSecret.from_master_secret(
         wrong_ms, b"", identifier, extendable=True, iteration_exponent=iteration_exponent
     )
@@ -383,17 +384,18 @@ def test_rework_from_stored_wrong_entropy_creates_divergent_shares():
     grouped_shares = shamir.split_ems(1, [(2, 3)], mislabeled_ems)
     reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
 
-    # Due to Feistel round-trip property, the ciphertext is actually the same as original
+    # Due to Feistel round-trip property, the ciphertext is actually the same as original:
+    # encrypt(decrypt(ct, empty_salt), empty_salt) = ct
     assert ems_from_wrong_entropy.ciphertext == ems_correct.ciphertext
 
     # So even through this path, a compliant tool recovers the original secret
+    # because the underlying ciphertext is unchanged.
     recovered = shamir.combine_mnemonics(reworked_mnemonics[:2])
     assert recovered == MS
 
-    # But verify_mnemonics can detect the salt mismatch if you know the correct secret:
-    # The shares claim non-extendable but were created by a buggy tool using empty salt.
-    # Since the ciphertext happens to be identical, the shares actually work with the
-    # non-extendable salt (they're valid). verify_mnemonics confirms this.
+    # Since the ciphertext is identical to the original (non-extendable) ciphertext,
+    # verify_mnemonics passes -- the shares work correctly with the non-extendable salt
+    # despite the buggy tool's use of the wrong salt internally.
     shamir.verify_mnemonics(reworked_mnemonics[:2], b"", MS)
 
 
