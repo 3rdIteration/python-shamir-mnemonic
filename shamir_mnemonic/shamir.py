@@ -22,7 +22,18 @@
 import hmac
 import secrets
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from . import cipher
 from .constants import (
@@ -711,7 +722,7 @@ def simulate_era_rework(
     mnemonics: Iterable[str],
     passphrase: bytes = b"",
     rework_groups: Sequence[Tuple[int, int]] = ((2, 3),),
-    new_identifier: int = None,
+    new_identifier: Optional[int] = None,
 ) -> EraReworkResult:
     """Simulate ERA wallet's SLIP39 rework (backup regeneration) path.
 
