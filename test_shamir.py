@@ -1881,3 +1881,213 @@ def test_era_import_acceptance_vs_correctness_matrix():
         assert not nonext_pp_rework_diff.original_secret_recoverable, (
             "NonExt+Pass: rework ✗ (different id destroys passphrase wallet)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Step-by-step Trezor → ERA workflows
+# ---------------------------------------------------------------------------
+# These tests map real-world Trezor user actions to code, answering:
+#   "What do I do on my Trezor to create a SLIP39 backup that will
+#    import incorrectly into the ERA wallet?"
+#
+# Workflow A (INCORRECT import — the dangerous path):
+#   1. On Trezor: create wallet with SLIP39 backup
+#   2. On Trezor: enable passphrase feature
+#   3. Import shares into ERA wallet
+#   4. ERA accepts — but ALL addresses are silently wrong
+#   5. ERA offers rework — reworked shares are also wrong
+#
+# Workflow B (CORRECT import — the safe path):
+#   1. On Trezor: create wallet with SLIP39 backup
+#   2. Do NOT enable passphrase
+#   3. Import shares into ERA wallet
+#   4. ERA accepts — addresses are correct
+#   5. ERA offers rework — reworked shares are also correct
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_trezor_slip39_that_imports_wrong_into_era():
+    """
+    Step-by-step workflow: how to create a Trezor SLIP39 backup that will
+    import INCORRECTLY into the ERA wallet.
+
+    This answers: "Can you give me the workflow for creating a SLIP39 backup
+    on an existing Trezor that will import incorrect into the ERA wallet?"
+
+    WORKFLOW (real-world steps → code equivalent):
+
+    Step 1 — Create or restore a wallet on your Trezor
+      The Trezor generates a random master secret internally.
+      → MS = b"ABCDEFGHIJKLMNOP"  (our test stand-in)
+
+    Step 2 — Create a SLIP39 backup on the Trezor
+      Current Trezor firmware FORCES extendable backup (since firmware 2.7.0+).
+      The Trezor encrypts the master secret into an EMS and splits it into
+      shares using Shamir's Secret Sharing.
+      → generate_mnemonics(..., extendable=True)
+
+    Step 3 — Enable passphrase on the Trezor
+      In Trezor Settings → Security → Passphrase, enable passphrase.
+      Enter a passphrase like "TREZOR".  The Trezor uses this passphrase
+      to decrypt the EMS → master secret → BIP32 seed → addresses.
+      → passphrase = b"TREZOR"
+      THIS IS THE TRIGGER.  Without this step, ERA import works correctly.
+
+    Step 4 — Import the SLIP39 shares into ERA wallet
+      Enter enough shares to meet the threshold (e.g. 3 of 5).
+      ERA accepts the shares — no error, no warning, no rejection.
+      → simulate_era_import(shares, passphrase)
+
+    Step 5 — ERA shows addresses
+      ERA's Bug 1 (decrypt with empty passphrase) means it stores the wrong
+      entropy.  ERA's Bug 2 (hardcoded extendable=False) changes the
+      encryption salt.  BOTH the default view AND the passphrase view in
+      ERA show WRONG addresses that don't match the Trezor.
+
+    Step 6 — ERA offers to rework (regenerate backup)
+      ERA accepts the rework request.  But the reworked shares are ALSO
+      wrong — they encode the wrong entropy with the wrong salt.
+      A compliant tool (including the Trezor itself) cannot recover the
+      original master secret from the reworked shares.
+
+    RESULT: The user's wallet appears empty or shows different addresses.
+    The original passphrase-protected wallet is silently inaccessible via ERA.
+    The original Trezor shares still work correctly on the Trezor itself.
+    """
+    # Step 1: Master secret (what the Trezor stores internally).
+    master_secret = MS
+
+    # Step 2: Trezor creates SLIP39 backup (current firmware forces extendable).
+    passphrase = b"TREZOR"
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], master_secret, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+    # The user writes down 5 shares on paper, e.g. "academic acid acrobat..."
+    assert len(trezor_shares) == 5
+
+    # Step 3: Passphrase is set on Trezor.  The Trezor derives addresses by
+    # decrypting EMS with the passphrase.  Let's record what the Trezor shows.
+    trezor_xprv = BIP32Key.fromEntropy(master_secret).ExtendedKey()
+
+    # Step 4: User imports 3 of 5 shares into ERA wallet.
+    shares_for_era = trezor_shares[:3]
+    era_result = shamir.simulate_era_import(shares_for_era, passphrase=passphrase)
+
+    # ERA "accepts" — no error.
+    assert era_result.stored_ems is not None
+    assert era_result.stored_entropy is not None
+
+    # Step 5: ERA shows addresses — ALL WRONG.
+    # Default (no-passphrase) view:
+    era_default_xprv = BIP32Key.fromEntropy(era_result.no_passphrase_seed).ExtendedKey()
+    assert era_default_xprv != trezor_xprv, (
+        "Step 5a: ERA default addresses don't match Trezor."
+    )
+
+    # Passphrase view (user enters "TREZOR" in ERA):
+    era_passphrase_xprv = BIP32Key.fromEntropy(era_result.passphrase_seed).ExtendedKey()
+    assert era_passphrase_xprv != trezor_xprv, (
+        "Step 5b: ERA passphrase addresses ALSO don't match Trezor — "
+        "Bug 2 changed the salt, breaking the Feistel round-trip."
+    )
+
+    # The three wallets (correct, ERA default, ERA passphrase) are all different.
+    assert era_default_xprv != era_passphrase_xprv, (
+        "ERA shows two distinct wrong wallets, neither matching the Trezor."
+    )
+
+    # Step 6: ERA offers rework — user accepts — reworked shares are ALSO wrong.
+    era_rework = shamir.simulate_era_rework(
+        shares_for_era, passphrase=passphrase, rework_groups=((2, 3),),
+    )
+    assert len(era_rework.reworked_shares) == 3, "ERA produces reworked shares."
+    assert not era_rework.original_secret_recoverable, (
+        "Step 6: Reworked shares do NOT recover the original master secret."
+    )
+
+    # The original Trezor shares STILL WORK on the Trezor itself.
+    recovered = shamir.combine_mnemonics(trezor_shares[:3], passphrase)
+    assert recovered == master_secret, (
+        "Original Trezor shares still recover the correct master secret — "
+        "the problem is only in ERA, not in the shares themselves."
+    )
+
+
+def test_workflow_trezor_slip39_that_imports_correctly_into_era():
+    """
+    Step-by-step workflow: how to create a Trezor SLIP39 backup that WILL
+    import CORRECTLY into the ERA wallet.
+
+    This is the SAFE path — the only difference from the dangerous workflow
+    is: DO NOT use a passphrase.
+
+    WORKFLOW (real-world steps → code equivalent):
+
+    Step 1 — Create or restore a wallet on your Trezor
+      → MS = b"ABCDEFGHIJKLMNOP"
+
+    Step 2 — Create a SLIP39 backup on the Trezor
+      Current firmware forces extendable backup.
+      → generate_mnemonics(..., extendable=True)
+
+    Step 3 — Do NOT enable passphrase on the Trezor
+      Leave passphrase disabled (the default setting).
+      → passphrase = b""
+      THIS IS THE KEY DIFFERENCE.
+
+    Step 4 — Import the SLIP39 shares into ERA wallet
+      ERA accepts the shares.
+      → simulate_era_import(shares, passphrase=b"")
+
+    Step 5 — ERA shows addresses — CORRECT
+      Bug 1 (decrypt with "") is harmless when no passphrase was used.
+      Bug 2 (extendable=False) changes the salt, but ERA's internal
+      round-trip is self-consistent, so the stored entropy is correct.
+
+    Step 6 — ERA offers to rework — reworked shares are ALSO correct
+      ERA re-encrypts the correct entropy.  A compliant tool recovers
+      the original master secret from the reworked shares.
+
+    RESULT: ERA shows the same addresses as the Trezor.
+    The reworked shares are also valid.
+    """
+    # Step 1: Master secret.
+    master_secret = MS
+
+    # Step 2: Trezor creates SLIP39 backup (extendable, NO passphrase).
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], master_secret, b"", extendable=True, iteration_exponent=1
+    )[0]
+    assert len(trezor_shares) == 5
+
+    # Step 3: No passphrase — Trezor derives addresses directly from master secret.
+    trezor_xprv = BIP32Key.fromEntropy(master_secret).ExtendedKey()
+
+    # Step 4: Import into ERA.
+    shares_for_era = trezor_shares[:3]
+    era_result = shamir.simulate_era_import(shares_for_era, passphrase=b"")
+
+    # Step 5: ERA shows CORRECT addresses.
+    era_default_xprv = BIP32Key.fromEntropy(era_result.no_passphrase_seed).ExtendedKey()
+    assert era_default_xprv == trezor_xprv, (
+        "Step 5: Without passphrase, ERA default addresses MATCH the Trezor."
+    )
+    assert era_result.stored_entropy == master_secret, (
+        "ERA stores the correct entropy when no passphrase is used."
+    )
+
+    # Step 6: ERA rework produces correct wallet.
+    era_rework = shamir.simulate_era_rework(
+        shares_for_era, passphrase=b"", rework_groups=((2, 3),),
+    )
+    assert era_rework.original_secret_recoverable, (
+        "Step 6: Reworked shares recover the original master secret."
+    )
+
+    # Reworked shares produce correct addresses.
+    reworked_xprv = BIP32Key.fromEntropy(
+        era_rework.recovered_without_passphrase
+    ).ExtendedKey()
+    assert reworked_xprv == trezor_xprv, (
+        "Reworked wallet produces the same addresses as the Trezor."
+    )
