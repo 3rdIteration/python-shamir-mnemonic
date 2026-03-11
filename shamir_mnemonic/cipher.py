@@ -27,6 +27,10 @@ def _round_function(i: int, passphrase: bytes, e: int, salt: bytes, r: bytes) ->
 def _get_salt(identifier: int, extendable: bool) -> bytes:
     """Return the salt for the Feistel cipher round function.
 
+    :param identifier: The random identifier for the set of shares.
+    :param extendable: If True, the salt is empty. If False, the salt includes the
+        identifier.
+
     For extendable shares, the salt is empty. For non-extendable shares, the salt
     includes the identifier, which means that re-generating shares (with a new random
     identifier) for the same master secret will produce a different encrypted form.

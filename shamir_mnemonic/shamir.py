@@ -389,7 +389,7 @@ def generate_mnemonics(
         If False, the identifier is included in the salt.
 
         .. note::
-            When ``extendable=False`` (non-extendable/non-reworkable shares), each call
+            When ``extendable=False`` (non-extendable shares), each call
             generates a new random identifier that is included in the encryption salt.
             This means that if shares are regenerated for the same master secret, the
             encrypted form will differ. Recovering with the *correct* passphrase always
