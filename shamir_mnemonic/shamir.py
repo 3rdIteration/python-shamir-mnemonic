@@ -519,6 +519,56 @@ def resplit_mnemonics(
     return [[share.mnemonic() for share in group] for group in grouped_shares]
 
 
+def reencode_shares(
+    mnemonics: Iterable[str],
+    extendable: bool,
+) -> List[str]:
+    """
+    Re-encode shares with a different extendable flag, recalculating checksums.
+
+    This function flips the extendable flag in each share and deterministically
+    recomputes the RS1024 checksum with the appropriate customization string.
+    **No brute-forcing is needed** — the checksum is a simple polynomial
+    computation.
+
+    .. warning::
+        This does **not** re-encrypt the share data. The underlying ciphertext
+        was encrypted with the original salt mode, so while the re-encoded shares
+        have valid checksums and parse correctly, they will **not** decrypt to the
+        correct master secret with the passphrase. Recovering with the correct
+        passphrase will yield a wrong result.
+
+        To properly convert shares between extendable and non-extendable modes
+        while maintaining passphrase consistency, use :func:`rework_mnemonics`,
+        which decrypts and re-encrypts the master secret.
+
+    This function exists to demonstrate that flipping the extendable flag and
+    fixing the checksum is trivial (answering the question "does that just mean
+    brute-forcing some words until one has a valid checksum?" — no, it does not),
+    but insufficient for passphrase consistency.
+
+    :param mnemonics: List of share mnemonics.
+    :param extendable: The new extendable flag value.
+    :return: List of re-encoded share mnemonics with recalculated checksums.
+    """
+    result = []
+    for mnemonic in mnemonics:
+        share = Share.from_mnemonic(mnemonic)
+        reencoded = Share(
+            identifier=share.identifier,
+            extendable=extendable,
+            iteration_exponent=share.iteration_exponent,
+            group_index=share.group_index,
+            group_threshold=share.group_threshold,
+            group_count=share.group_count,
+            index=share.index,
+            member_threshold=share.member_threshold,
+            value=share.value,
+        )
+        result.append(reencoded.mnemonic())
+    return result
+
+
 def rework_mnemonics(
     mnemonics: Iterable[str],
     passphrase: bytes,

@@ -463,3 +463,104 @@ def test_verify_detects_wrong_salt_mode():
 
     # Decrypt with extendable=False (what the flag says) gives wrong result.
     assert ems.decrypt(b"TREZOR") != MS
+
+
+def test_reencode_shares_checksum_is_trivial():
+    """Re-encoding shares with a different extendable flag is trivial and
+    deterministic — no brute-forcing of words is needed.
+
+    The RS1024 checksum is simply recomputed with the new customization string.
+    The result is a valid mnemonic that can be parsed without errors.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-encode as extendable. This is a simple, deterministic operation.
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+
+    # Each re-encoded share is a valid mnemonic (passes checksum verification).
+    for mnemonic in reencoded:
+        share = shamir.Share.from_mnemonic(mnemonic)
+        assert share.extendable is True
+
+    # The original shares are non-extendable.
+    for mnemonic in original[:3]:
+        share = shamir.Share.from_mnemonic(mnemonic)
+        assert share.extendable is False
+
+
+def test_reencode_shares_breaks_passphrase_recovery():
+    """Re-encoding shares (fixing checksums) is NOT sufficient for passphrase
+    consistency. The "extra step" is not brute-forcing checksums — it's
+    re-encrypting the data with the correct salt, which requires the passphrase.
+
+    Re-encoded shares parse correctly but decrypt to the wrong master secret,
+    because the ciphertext was encrypted with the non-extendable salt (which
+    includes the identifier) but the re-encoded shares now claim to be extendable
+    (empty salt).
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-encode as extendable (just flips flag + fixes checksum).
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+
+    # The re-encoded shares are parseable and combine without error...
+    result = shamir.combine_mnemonics(reencoded, b"TREZOR")
+
+    # ...but the result is WRONG because the ciphertext inside was encrypted
+    # with non-extendable salt (identifier-based), while combine_mnemonics
+    # now decrypts with extendable salt (empty).
+    assert result != MS
+
+
+def test_reencode_vs_rework_passphrase_consistency():
+    """Contrast reencode_shares (insufficient) with rework_mnemonics (correct).
+
+    reencode_shares just flips the flag and fixes the checksum. This is trivial
+    but breaks passphrase recovery.
+
+    rework_mnemonics decrypts with the old salt and re-encrypts with the new salt.
+    This requires the passphrase but correctly maintains passphrase consistency.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Approach 1: Just flip the flag (wrong — breaks recovery).
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+    assert shamir.combine_mnemonics(reencoded, b"TREZOR") != MS
+
+    # Approach 2: Full rework with passphrase (correct — preserves recovery).
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(3, 5)]
+    )
+    assert shamir.combine_mnemonics(reworked[0][:3], b"TREZOR") == MS
+
+
+def test_reencode_shares_preserves_share_data():
+    """Re-encoding preserves the underlying share value bytes. Only the flag
+    and checksum change.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    reencoded = shamir.reencode_shares(original, extendable=True)
+
+    for orig_mnemonic, new_mnemonic in zip(original, reencoded):
+        orig_share = shamir.Share.from_mnemonic(orig_mnemonic)
+        new_share = shamir.Share.from_mnemonic(new_mnemonic)
+
+        # The value bytes are identical.
+        assert orig_share.value == new_share.value
+        # The identifier and other metadata are identical.
+        assert orig_share.identifier == new_share.identifier
+        assert orig_share.iteration_exponent == new_share.iteration_exponent
+        assert orig_share.group_index == new_share.group_index
+        assert orig_share.index == new_share.index
+        # Only the extendable flag differs.
+        assert orig_share.extendable is False
+        assert new_share.extendable is True
