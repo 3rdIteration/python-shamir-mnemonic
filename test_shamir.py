@@ -2790,3 +2790,201 @@ def test_era_reworked_shares_imported_to_trezor_with_passphrase_both_wrong():
         "Original Trezor shares still recover the correct passphrase wallet.  "
         "Only the ERA-reworked shares are wrong."
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-extendable Trezor seed → ERA import: is the same issue present?
+# ---------------------------------------------------------------------------
+# The user asked: "So does the issue I described where a seed from Trezor
+# is imported into ERA wallet also happen for a non-extendable seed
+# generated on a Trezor?"
+#
+# Answer: PARTIALLY.  ERA Bug 1 (empty passphrase) still applies, but
+# Bug 2 (hardcoded extendable=false) is a NO-OP because the shares are
+# already non-extendable.  The Feistel round-trip property preserves
+# the EMS ciphertext when the salt is unchanged, so:
+#
+#   - Default (no-passphrase) addresses:
+#       * If Trezor created shares without passphrase → CORRECT ✓
+#       * If Trezor created shares with passphrase → WRONG ✗ (Bug 1)
+#
+#   - Passphrase addresses:
+#       * CORRECT ✓ — saved by Feistel round-trip (salt unchanged)
+#       * This is the key difference from extendable shares, where
+#         BOTH Bug 1 and Bug 2 break the passphrase wallet
+#
+#   - ERA-reworked shares + passphrase:
+#       * With same identifier → passphrase wallet SURVIVES ✓
+#       * With different identifier → passphrase wallet DESTROYED ✗
+#
+# So for non-extendable: the passphrase wallet works in ERA, BUT the
+# ERA-reworked shares are still risky if the identifier changes.
+# For extendable: EVERYTHING is broken (the reported fault).
+# ---------------------------------------------------------------------------
+
+
+def test_trezor_nonextendable_seed_imported_to_era_with_passphrase():
+    """
+    User question: "Does this issue also happen for a non-extendable seed
+    generated on a Trezor?"
+
+    This test models the SAME workflow as the confirmed fault test
+    (test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost)
+    but uses non-extendable shares instead of extendable ones.
+
+    FINDING: The behavior is DIFFERENT from extendable shares:
+
+    For EXTENDABLE (current Trezor firmware, e.g. Safe 7):
+      - Default address: CORRECT ✓ (user builds false confidence)
+      - Passphrase address: WRONG ✗ (Bug 2 changes salt → Feistel breaks)
+      - ERA-reworked + passphrase: WRONG ✗ (funds lost)
+
+    For NON-EXTENDABLE (historical Trezor firmware):
+      - Default address: CORRECT ✓
+      - Passphrase address: CORRECT ✓ (Bug 2 is no-op → Feistel preserves EMS)
+      - ERA-reworked + same identifier + passphrase: CORRECT ✓
+      - ERA-reworked + different identifier + passphrase: WRONG ✗ (funds lost)
+
+    So for non-extendable shares, the passphrase wallet is SAFE in ERA
+    as long as the identifier is preserved.  The original confirmed fault
+    ONLY occurs with extendable shares (which current Trezor firmware forces).
+    """
+    passphrase = b"TREZOR"
+
+    # === Step 1: Create NON-EXTENDABLE shares on Trezor (historical firmware) ===
+    # Older Trezor firmware generated non-extendable backups.
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=False, iteration_exponent=1
+    )[0]
+    assert len(trezor_shares) == 5
+
+    # What the Trezor shows.
+    trezor_default_seed = MS
+    trezor_default_xprv = BIP32Key.fromEntropy(trezor_default_seed).ExtendedKey()
+
+    trezor_passphrase_seed = shamir.combine_mnemonics(trezor_shares[:3], passphrase)
+    trezor_passphrase_xprv = BIP32Key.fromEntropy(trezor_passphrase_seed).ExtendedKey()
+
+    assert trezor_default_xprv != trezor_passphrase_xprv
+
+    # === Step 2: Import to ERA — default address check ===
+    era_result = shamir.simulate_era_import(trezor_shares[:3], passphrase=passphrase)
+
+    era_default_xprv = BIP32Key.fromEntropy(
+        era_result.no_passphrase_seed
+    ).ExtendedKey()
+    assert era_default_xprv == trezor_default_xprv, (
+        "NON-EXTENDABLE: default address is CORRECT ✓ (same as extendable)."
+    )
+
+    # === Step 3: Enable passphrase on Trezor — THIS IS THE KEY DIFFERENCE ===
+    # For extendable shares: ERA passphrase address is WRONG.
+    # For non-extendable shares: ERA passphrase address is CORRECT!
+    era_passphrase_xprv = BIP32Key.fromEntropy(
+        era_result.passphrase_seed
+    ).ExtendedKey()
+    assert era_passphrase_xprv == trezor_passphrase_xprv, (
+        "NON-EXTENDABLE: passphrase address is CORRECT ✓  "
+        "This is the KEY DIFFERENCE from extendable shares.  "
+        "Bug 2 (extendable=false) is a no-op for non-extendable shares, "
+        "so the Feistel round-trip preserves the EMS ciphertext, and "
+        "decrypt(stored_ems, passphrase) gives the correct seed."
+    )
+
+    # Verify the underlying reason: the stored EMS is identical to the original.
+    groups = shamir.decode_mnemonics(trezor_shares[:3])
+    original_ems = shamir.recover_ems(groups)
+    assert era_result.stored_ems == original_ems.ciphertext, (
+        "Feistel round-trip preserves the EMS for non-extendable shares "
+        "because the salt (derived from identifier + extendable flag) "
+        "is unchanged when Bug 2 is a no-op."
+    )
+
+    # === Step 4: ERA reworks shares (same identifier) ===
+    era_rework_same_id = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+    )
+    assert len(era_rework_same_id.reworked_shares) == 3
+
+    # With same identifier, passphrase wallet IS recoverable.
+    assert era_rework_same_id.original_secret_recoverable, (
+        "NON-EXTENDABLE + same identifier: reworked shares CAN recover "
+        "the passphrase wallet ✓  The Feistel round-trip and matching "
+        "identifier preserve the EMS, so passphrase derivation works."
+    )
+
+    reworked_pp_xprv = BIP32Key.fromEntropy(
+        era_rework_same_id.recovered_with_passphrase
+    ).ExtendedKey()
+    assert reworked_pp_xprv == trezor_passphrase_xprv, (
+        "NON-EXTENDABLE + same identifier: reworked shares + passphrase "
+        "give the SAME addresses as the original Trezor ✓"
+    )
+
+    # === Step 5: ERA reworks shares (DIFFERENT identifier — risk scenario) ===
+    # This models what happens if ERA's getAccountSlip39Identifier() returns
+    # a different value (e.g. 0 when no active session).
+    era_rework_new_id = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+        new_identifier=0,
+    )
+
+    # With different identifier, passphrase wallet IS at risk.
+    assert not era_rework_new_id.original_secret_recoverable, (
+        "NON-EXTENDABLE + different identifier: reworked shares CANNOT "
+        "recover the passphrase wallet ✗  The different identifier changes "
+        "the Feistel salt, making the EMS unrecoverable."
+    )
+
+    reworked_new_id_pp_xprv = BIP32Key.fromEntropy(
+        era_rework_new_id.recovered_with_passphrase
+    ).ExtendedKey()
+    assert reworked_new_id_pp_xprv != trezor_passphrase_xprv, (
+        "NON-EXTENDABLE + different identifier: FUND LOSS ✗  "
+        "Reworked shares + passphrase give WRONG addresses."
+    )
+
+    # === Step 6: Contrast with extendable (the confirmed fault) ===
+    # Generate the same wallet but with extendable=True to show the difference.
+    extendable_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
+    )[0]
+
+    ext_result = shamir.simulate_era_import(
+        extendable_shares[:3], passphrase=passphrase
+    )
+
+    ext_passphrase_xprv = BIP32Key.fromEntropy(
+        ext_result.passphrase_seed
+    ).ExtendedKey()
+
+    # Extendable: passphrase address is WRONG (the confirmed fault).
+    ext_trezor_passphrase_seed = shamir.combine_mnemonics(
+        extendable_shares[:3], passphrase
+    )
+    ext_trezor_passphrase_xprv = BIP32Key.fromEntropy(
+        ext_trezor_passphrase_seed
+    ).ExtendedKey()
+
+    assert ext_passphrase_xprv != ext_trezor_passphrase_xprv, (
+        "EXTENDABLE: passphrase address is WRONG ✗ (confirmed fault)."
+    )
+
+    # Non-extendable: passphrase address is CORRECT (the safe case).
+    assert era_passphrase_xprv == trezor_passphrase_xprv, (
+        "NON-EXTENDABLE: passphrase address is CORRECT ✓ (safe case)."
+    )
+
+    # === Summary ===
+    # For non-extendable Trezor seeds imported into ERA:
+    #   - The passphrase wallet works correctly in ERA ✓
+    #   - ERA-reworked shares with same identifier: passphrase wallet survives ✓
+    #   - ERA-reworked shares with different identifier: FUND LOSS risk ✗
+    # For extendable Trezor seeds (current firmware, e.g. Safe 7):
+    #   - The passphrase wallet is WRONG from the moment of import ✗
+    #   - ERA-reworked shares: always WRONG regardless of identifier ✗
+    #   - This is the confirmed fault that causes permanent fund loss
