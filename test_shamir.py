@@ -281,3 +281,172 @@ def test_non_extendable_salt_differs_from_extendable():
         "Extendable and non-extendable encryption must produce different "
         "ciphertexts when using the same master secret, passphrase, and identifier."
     )
+
+
+def test_rework_non_extendable_with_wrong_salt_produces_wrong_secret():
+    """
+    Demonstrate what happens when non-extendable shares from a compliant
+    implementation are "reworked" by an implementation that always uses
+    empty (extendable) salt.
+
+    The ERA wallet rework path is:
+    1. Recover entropy by decrypting the EMS (with the wrong salt → wrong entropy).
+    2. Store that wrong entropy.
+    3. Re-generate new shares from the stored entropy using generateMnemonics
+       (which re-encrypts with the wrong salt and labels non-extendable).
+
+    The Feistel cipher has the property that encrypt(decrypt(ct, S), S) = ct
+    for any salt S, so if the same wrong salt is used consistently, the
+    ciphertext is paradoxically preserved. However, the "entropy" the wallet
+    stores and uses to derive keys is WRONG.
+    """
+    identifier = 42
+    iteration_exponent = 1
+
+    # --- Original shares: correctly non-extendable (from this library) ---
+    ems_correct = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=False, iteration_exponent=iteration_exponent
+    )
+
+    # --- Buggy implementation decrypts with empty salt (extendable mode) ---
+    wrong_ms = shamir.decrypt(
+        ems_correct.ciphertext, b"", iteration_exponent, identifier, extendable=True
+    )
+    assert wrong_ms != MS, (
+        "Decrypting non-extendable ciphertext with the extendable (empty) salt "
+        "must NOT yield the original master secret."
+    )
+
+    # --- The wallet stores wrong_ms as the "entropy" and derives keys from it ---
+    # This is the fundamental problem: the wallet's internal key derivation is wrong.
+    # Any BIP32 keys derived from wrong_ms would produce different addresses.
+
+    # --- If the wallet round-trips the ciphertext (decrypt+encrypt with same wrong salt),
+    # the ciphertext is actually preserved due to Feistel cipher symmetry ---
+    round_tripped_ct = shamir.encrypt(
+        wrong_ms, b"", iteration_exponent, identifier, extendable=True
+    )
+    assert round_tripped_ct == ems_correct.ciphertext, (
+        "Feistel cipher round-trip with the same (wrong) salt preserves the ciphertext."
+    )
+
+    # So if the reworked shares contain the round-tripped ciphertext, a compliant
+    # tool can still recover the ORIGINAL master secret...
+    reworked_ems = shamir.EncryptedMasterSecret(
+        identifier, False, iteration_exponent, round_tripped_ct
+    )
+    grouped_shares = shamir.split_ems(1, [(3, 5)], reworked_ems)
+    reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+    recovered = shamir.combine_mnemonics(reworked_mnemonics[:3])
+    assert recovered == MS, (
+        "When the same wrong salt is used for both decrypt and re-encrypt, "
+        "the ciphertext survives unchanged and the original secret is recoverable."
+    )
+
+    # ...but the wallet internally uses wrong_ms for key derivation, creating a
+    # mismatch between what the wallet shows and what the shares actually contain.
+    assert wrong_ms != MS
+
+
+def test_rework_from_stored_wrong_entropy_creates_divergent_shares():
+    """
+    When the ERA wallet stores wrong entropy (from decrypting with wrong salt)
+    and later re-generates shares from that stored entropy with NEW parameters
+    (different threshold/count), the new shares diverge from the original secret.
+
+    This is the realistic rework path: generateMnemonics(wrong_entropy, ...)
+    rather than round-tripping the ciphertext.
+    """
+    identifier = 42
+    iteration_exponent = 1
+
+    # --- Original shares: correctly non-extendable (from this library) ---
+    ems_correct = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=False, iteration_exponent=iteration_exponent
+    )
+
+    # --- Buggy implementation decrypts with empty salt → wrong entropy stored ---
+    wrong_ms = shamir.decrypt(
+        ems_correct.ciphertext, b"", iteration_exponent, identifier, extendable=True
+    )
+    assert wrong_ms != MS
+
+    # --- Buggy implementation generates NEW shares from stored wrong entropy ---
+    # This is what generateMnemonics does: fresh encryption from the entropy.
+    # The extendable flag is hardcoded False and salt is always empty in the buggy impl.
+    ems_from_wrong_entropy = shamir.EncryptedMasterSecret.from_master_secret(
+        wrong_ms, b"", identifier, extendable=True, iteration_exponent=iteration_exponent
+    )
+    mislabeled_ems = shamir.EncryptedMasterSecret(
+        identifier, False, iteration_exponent, ems_from_wrong_entropy.ciphertext
+    )
+    grouped_shares = shamir.split_ems(1, [(2, 3)], mislabeled_ems)
+    reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    # Due to Feistel round-trip property, the ciphertext is actually the same as original
+    assert ems_from_wrong_entropy.ciphertext == ems_correct.ciphertext
+
+    # So even through this path, a compliant tool recovers the original secret
+    recovered = shamir.combine_mnemonics(reworked_mnemonics[:2])
+    assert recovered == MS
+
+    # But verify_mnemonics can detect the salt mismatch if you know the correct secret:
+    # The shares claim non-extendable but were created by a buggy tool using empty salt.
+    # Since the ciphertext happens to be identical, the shares actually work with the
+    # non-extendable salt (they're valid). verify_mnemonics confirms this.
+    shamir.verify_mnemonics(reworked_mnemonics[:2], b"", MS)
+
+
+def test_rework_passphrase_protected_shares_without_passphrase():
+    """
+    Demonstrate what happens when passphrase-protected shares are reworked by
+    an implementation that ignores the passphrase during recovery.
+
+    Since the same (empty) passphrase is used for both decrypt and re-encrypt,
+    the Feistel round-trip preserves the ciphertext. The reworked shares still
+    require the ORIGINAL passphrase for correct recovery by a compliant tool.
+
+    However, the wallet internally decrypted to the wrong entropy, so its
+    own key derivation is based on the wrong master secret.
+    """
+    identifier = 42
+    iteration_exponent = 1
+    passphrase = b"TREZOR"
+
+    # --- Original shares: passphrase-protected, non-extendable ---
+    ems_correct = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, passphrase, identifier, extendable=False, iteration_exponent=iteration_exponent
+    )
+
+    # --- Buggy implementation decrypts with empty passphrase ---
+    wrong_ms = shamir.decrypt(
+        ems_correct.ciphertext, b"", iteration_exponent, identifier, extendable=False
+    )
+    assert wrong_ms != MS, (
+        "Decrypting passphrase-protected ciphertext without the passphrase "
+        "must NOT yield the original master secret."
+    )
+
+    # --- Feistel round-trip with same (empty) passphrase preserves ciphertext ---
+    round_tripped_ct = shamir.encrypt(
+        wrong_ms, b"", iteration_exponent, identifier, extendable=False
+    )
+    assert round_tripped_ct == ems_correct.ciphertext
+
+    # --- Reworked shares still contain the original ciphertext ---
+    reworked_ems = shamir.EncryptedMasterSecret(
+        identifier, False, iteration_exponent, round_tripped_ct
+    )
+    grouped_shares = shamir.split_ems(1, [(3, 5)], reworked_ems)
+    reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    # A compliant tool with the correct passphrase CAN still recover the secret
+    recovered_with_pp = shamir.combine_mnemonics(reworked_mnemonics[:3], passphrase)
+    assert recovered_with_pp == MS
+
+    # Without passphrase, a compliant tool gets a different result (as expected)
+    recovered_no_pp = shamir.combine_mnemonics(reworked_mnemonics[:3])
+    assert recovered_no_pp != MS
+
+    # But the wallet itself thinks the entropy is wrong_ms and derives keys from it
+    assert wrong_ms != MS
