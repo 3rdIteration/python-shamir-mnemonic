@@ -2096,9 +2096,10 @@ def test_workflow_trezor_slip39_that_imports_wrong_into_era():
     The original Trezor shares still work correctly on the Trezor itself.
     """
     # Step 1: Master secret (what the Trezor derives when using the passphrase).
-    # In real Trezor firmware, the EMS is random bytes and the "master secret"
-    # is decrypt(random_EMS, passphrase).  Our generate_mnemonics() encodes the
-    # same relationship: combine_mnemonics(shares, passphrase) → MS.
+    # In real Trezor firmware, random EMS bytes are generated directly, and the
+    # seed is derived via decrypt(random_EMS, passphrase).  Our test uses
+    # generate_mnemonics() which produces shares with the same recovery
+    # relationship: combine_mnemonics(shares, passphrase) → MS.
     master_secret = MS
 
     # Step 2: Trezor creates SLIP39 backup (current firmware forces extendable).
@@ -2439,9 +2440,10 @@ def test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost():
     passphrase = b"TREZOR"
 
     # === Step 1: Create SLIP39 shares on Trezor ===
-    # Trezor generates random EMS and splits into shares — no passphrase.
-    # We model this with generate_mnemonics(MS, b"") which is equivalent:
-    # the EMS internally = encrypt(MS, ""), and combine(shares, "") = MS.
+    # In real Trezor firmware, random EMS bytes are generated directly and
+    # split into shares via split_ems() — no passphrase is involved.
+    # We use generate_mnemonics(MS, b"") as a test convenience that produces
+    # shares with the same recovery relationship: combine(shares, "") = MS.
     trezor_shares = shamir.generate_mnemonics(
         1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
     )[0]
