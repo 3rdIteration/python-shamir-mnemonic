@@ -2248,3 +2248,120 @@ def test_workflow_trezor_slip39_that_imports_correctly_into_era():
     assert reworked_xprv == trezor_xprv, (
         "Reworked wallet produces the same addresses as the Trezor."
     )
+
+
+# ---------------------------------------------------------------------------
+# Confirmed real-world use case: Trezor Safe 7 + passphrase + ERA wallet
+# ---------------------------------------------------------------------------
+# A user reported: "I imported a SLIP39 share from a Trezor Safe 7 and set a
+# passphrase.  I get different addresses on the ERA wallet compared to the
+# Trezor."
+#
+# This is the confirmed real-world manifestation of ERA wallet Bugs 1 and 2.
+#
+# Why it happens:
+#   - Trezor Safe 7 runs current firmware which forces extendable SLIP39 backups
+#   - The Trezor generates a random EMS and splits it into shares (no passphrase)
+#   - The user enables passphrase on the Trezor → seed = decrypt(EMS, passphrase)
+#   - ERA imports the shares, recovers the EMS, but:
+#       Bug 1: decrypts EMS with "" instead of the user's passphrase
+#       Bug 2: re-encrypts with extendable=False (wrong salt for extendable shares)
+#   - ERA shows addresses derived from a DIFFERENT seed than the Trezor
+#   - ERA does NOT show any error or warning — the addresses are silently wrong
+#
+# The user's original Trezor shares still work correctly on the Trezor itself.
+# The problem is entirely in ERA's import path.
+# ---------------------------------------------------------------------------
+
+
+def test_trezor_safe_7_with_passphrase_era_gives_different_addresses():
+    """
+    Confirmed real-world use case: importing SLIP39 shares from a Trezor Safe 7
+    with a passphrase into ERA wallet produces different addresses.
+
+    A user reported:
+      "I imported a SLIP39 share from a Trezor Safe 7 and set a passphrase.
+       I get different addresses on the ERA wallet compared to the Trezor."
+
+    Trezor Safe 7 characteristics:
+      - Runs current firmware (forces extendable SLIP39 backups)
+      - Passphrase is set in Settings → Security → Passphrase
+      - Passphrase is NOT used during share generation (see finding #6 in
+        the Trezor firmware analysis section above)
+      - Passphrase is only applied when deriving the seed: get_seed()
+
+    Root cause:
+      ERA Bug 1: Always decrypts EMS with empty passphrase → wrong entropy
+      ERA Bug 2: Hardcodes extendable=False → wrong salt → Feistel round-trip
+                 is broken for extendable shares, so even entering the correct
+                 passphrase in ERA gives wrong addresses
+
+    Both bugs combine to make ALL addresses wrong — default AND passphrase
+    views in ERA show different addresses than the Trezor Safe 7.
+    """
+    # === Trezor Safe 7 setup ===
+    # The Trezor generates random EMS internally, but for testing we use
+    # generate_mnemonics() which produces equivalent shares.
+    master_secret = MS
+    passphrase = b"TREZOR"
+
+    # Trezor Safe 7: current firmware forces extendable SLIP39 backup.
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], master_secret, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    # What the Trezor Safe 7 shows as the wallet address root.
+    trezor_xprv = BIP32Key.fromEntropy(master_secret).ExtendedKey()
+
+    # === Import into ERA wallet ===
+    era_result = shamir.simulate_era_import(trezor_shares[:3], passphrase=passphrase)
+
+    # === The user's observation: "I get different addresses" ===
+    # ERA's default (no-passphrase) view: WRONG.
+    era_default_xprv = BIP32Key.fromEntropy(era_result.no_passphrase_seed).ExtendedKey()
+    assert era_default_xprv != trezor_xprv, (
+        "ERA default addresses differ from Trezor Safe 7 — this is what the user sees."
+    )
+
+    # ERA's passphrase view (user enters same passphrase in ERA): ALSO WRONG.
+    era_passphrase_xprv = BIP32Key.fromEntropy(era_result.passphrase_seed).ExtendedKey()
+    assert era_passphrase_xprv != trezor_xprv, (
+        "Even entering the correct passphrase in ERA gives different addresses "
+        "than the Trezor Safe 7 — Bug 2 broke the Feistel round-trip."
+    )
+
+    # Three distinct wallet roots: Trezor's correct one and ERA's two wrong ones.
+    assert era_default_xprv != era_passphrase_xprv, (
+        "ERA's default and passphrase views are BOTH wrong AND different from each other."
+    )
+
+    # === The shares themselves are fine ===
+    # A compliant tool (or the Trezor itself) recovers the correct secret.
+    recovered = shamir.combine_mnemonics(trezor_shares[:3], passphrase)
+    assert recovered == master_secret, (
+        "The shares are not damaged — the Trezor Safe 7 still shows correct addresses. "
+        "The problem is entirely in ERA's import path."
+    )
+
+    # === Also verify via split_ems to model Trezor's actual internal flow ===
+    # Trezor Safe 7 generates random EMS and splits via split_ems() — no passphrase.
+    random_ems = secrets.token_bytes(16)
+    ems_obj = shamir.EncryptedMasterSecret(
+        identifier=123, extendable=True, iteration_exponent=1, ciphertext=random_ems,
+    )
+    safe7_shares = shamir.split_ems(1, [(3, 5)], ems_obj)
+    safe7_mnemonics = [s.mnemonic() for s in safe7_shares[0]]
+
+    # Trezor Safe 7 seed: decrypt(EMS, passphrase).
+    trezor_seed = ems_obj.decrypt(passphrase)
+    trezor_seed_xprv = BIP32Key.fromEntropy(trezor_seed).ExtendedKey()
+
+    # ERA import of the same shares.
+    era_result2 = shamir.simulate_era_import(safe7_mnemonics[:3], passphrase=passphrase)
+    era_xprv2 = BIP32Key.fromEntropy(era_result2.no_passphrase_seed).ExtendedKey()
+
+    # ERA shows different addresses than the Trezor Safe 7.
+    assert era_xprv2 != trezor_seed_xprv, (
+        "Confirmed: ERA shows different addresses than Trezor Safe 7 when "
+        "SLIP39 shares are imported with a passphrase."
+    )
