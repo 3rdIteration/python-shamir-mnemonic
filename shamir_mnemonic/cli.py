@@ -12,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import generate_mnemonics
+from .shamir import ShareGroup, generate_mnemonics, recover_ems
 from .share import Share
 from .utils import MnemonicError
 
@@ -152,6 +152,133 @@ def create(
         click.echo(f"{group_str} - {share_str}")
         for g in group:
             click.echo(g)
+
+
+@cli.command()
+@click.argument("mnemonics", nargs=-1, required=True)
+@click.option("-p", "--passphrase", default="", help="Passphrase for decryption.")
+def decode(mnemonics: Sequence[str], passphrase: str) -> None:
+    """Decode one or more SLIP-39 share mnemonics and display their internal data.
+
+    When enough shares are provided to complete recovery, the Encrypted Master
+    Secret and the decrypted Master Secret are shown as well. Because some
+    hardware wallets mark shares as non-extendable but actually use extendable
+    (empty) salt, recovery is attempted both ways when the extendable flag is
+    False.
+
+    Each MNEMONIC is a space-separated sequence of words enclosed in quotes.
+
+    Example usage:
+
+    \b
+    shamir decode "word1 word2 word3 ..." "word1 word2 word3 ..."
+    """
+    try:
+        passphrase_bytes = passphrase.encode("ascii")
+    except UnicodeEncodeError:
+        raise click.ClickException("Passphrase must be ASCII only")
+
+    shares = []
+    for i, mnemonic in enumerate(mnemonics, 1):
+        click.echo(style(f"Share #{i}:", bold=True))
+        try:
+            share = Share.from_mnemonic(mnemonic)
+        except MnemonicError as e:
+            click.echo(style(f"  ERROR: {e}", fg="red"))
+            click.echo()
+            continue
+
+        shares.append(share)
+
+        click.echo(f"  {style('Mnemonic:', fg='cyan')} {mnemonic}")
+        click.echo(f"  {style('Identifier:', fg='cyan')} {share.identifier}")
+        click.echo(f"  {style('Extendable:', fg='cyan')} {share.extendable}")
+        click.echo(
+            f"  {style('Iteration exponent:', fg='cyan')} {share.iteration_exponent}"
+        )
+        click.echo(f"  {style('Group index:', fg='cyan')} {share.group_index}")
+        click.echo(f"  {style('Group threshold:', fg='cyan')} {share.group_threshold}")
+        click.echo(f"  {style('Group count:', fg='cyan')} {share.group_count}")
+        click.echo(f"  {style('Member index:', fg='cyan')} {share.index}")
+        click.echo(
+            f"  {style('Member threshold:', fg='cyan')} {share.member_threshold}"
+        )
+        click.echo(f"  {style('Share value:', fg='cyan')} {share.value.hex()}")
+        click.echo()
+
+    if len(shares) < 2:
+        return
+
+    # Check if shares belong to the same set
+    common_params = set(s.common_parameters() for s in shares)
+    if len(common_params) == 1:
+        click.echo(style("All shares belong to the same set.", fg="green"))
+    else:
+        click.echo(
+            style(
+                "WARNING: Shares do not all belong to the same set.",
+                fg="yellow",
+                bold=True,
+            )
+        )
+
+    # Group already-parsed shares by group index
+    groups: dict[int, ShareGroup] = {}
+    try:
+        for share in shares:
+            group = groups.setdefault(share.group_index, ShareGroup())
+            group.add(share)
+        for group_index, group in sorted(groups.items()):
+            gp = group.group_parameters()
+            complete = group.is_complete()
+            status = (
+                style("COMPLETE", fg="green", bold=True)
+                if complete
+                else style("INCOMPLETE", fg="yellow")
+            )
+            click.echo(
+                f"  Group {group_index}: "
+                f"{len(group)}/{gp.member_threshold} shares ({status})"
+            )
+    except MnemonicError:
+        pass
+
+    # Attempt recovery when shares form a complete set
+    try:
+        ems = recover_ems(groups)
+    except MnemonicError:
+        return
+
+    click.echo()
+    click.echo(style("Recovery:", bold=True))
+    click.echo(
+        f"  {style('Encrypted Master Secret (EMS):', fg='cyan')} "
+        f"{ems.ciphertext.hex()}"
+    )
+
+    master_secret = ems.decrypt(passphrase_bytes)
+    click.echo(
+        f"  {style(f'Master Secret (decrypted, extendable={ems.extendable}):', fg='cyan')} "
+        f"{master_secret.hex()}"
+    )
+
+    # If shares are marked non-extendable, also try with extendable (empty)
+    # salt.  Some hardware wallets have a bug where shares are flagged as
+    # non-extendable but were actually encrypted with an empty salt.
+    if not ems.extendable:
+        from . import cipher
+
+        alt_secret = cipher.decrypt(
+            ems.ciphertext,
+            passphrase_bytes,
+            ems.iteration_exponent,
+            ems.identifier,
+            True,  # pretend extendable
+        )
+        click.echo(
+            f"  {style('Master Secret (decrypted, extendable=True):', fg='cyan')} "
+            f"{alt_secret.hex()}"
+        )
 
 
 FINISHED = style("\u2713", fg="green", bold=True)
