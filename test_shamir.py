@@ -2547,3 +2547,246 @@ def test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost():
     assert recovered_default == trezor_default_seed
     assert recovered_passphrase == trezor_passphrase_seed
     # But if only ERA-reworked shares remain → passphrase wallet is lost forever.
+
+
+# ---------------------------------------------------------------------------
+# Reverse direction: ERA wallet shares → imported into Trezor + passphrase
+# ---------------------------------------------------------------------------
+# The user asked: "Is this also likely to cause an issue if an ERA wallet
+# is imported into a Trezor and a passphrase is then applied?"
+#
+# Answer: It depends on where the ERA shares came from.
+#
+# Case A — ERA-NATIVE shares (created in ERA, never touched another device):
+#   ERA creates shares with extendable=false and empty passphrase encryption.
+#   When imported into a Trezor, the Trezor recovers the same EMS that ERA
+#   stored.  Both ERA and Trezor compute the same passphrase wallet:
+#     decrypt(EMS, passphrase, id, false, ie)
+#   RESULT: Addresses MATCH.  The ERA → Trezor direction is SAFE for
+#   ERA-native shares, even with a passphrase.
+#
+# Case B — ERA-REWORKED shares (from a previous Trezor import with passphrase):
+#   These shares encode ERA's stored entropy (from the buggy import).
+#   The NO-PASSPHRASE wallet is preserved because ERA's Bug 1 (decrypt
+#   with "") correctly recovers the master secret when the original shares
+#   were also created with empty passphrase.
+#   But the PASSPHRASE wallet is WRONG: the EMS differs (different salt
+#   from Bug 2: extendable→non-extendable), so decrypt(EMS, passphrase)
+#   produces a different seed.
+#   RESULT: ERA and new Trezor AGREE with each other.  The default wallet
+#   matches the original Trezor.  But the PASSPHRASE wallet is lost.
+#   This is the same data corruption from the original Trezor→ERA import,
+#   just viewed from the other side.
+# ---------------------------------------------------------------------------
+
+
+def test_era_native_shares_imported_to_trezor_with_passphrase_is_safe():
+    """
+    Reverse direction test: ERA-native shares → imported into Trezor → passphrase.
+
+    The user asked: "Is this also likely to cause an issue if an ERA wallet
+    is imported into a Trezor and a passphrase is then applied?"
+
+    For ERA-NATIVE shares (created entirely within ERA), the answer is NO —
+    importing into a Trezor and applying a passphrase works correctly.
+
+    Why it works:
+      - ERA creates shares with extendable=false and empty passphrase
+      - The EMS in these shares = encrypt(MS, "", id, false, ie)
+      - Trezor imports the shares → recovers the same EMS → stores it
+      - Trezor's no-passphrase wallet: decrypt(EMS, "") = MS ✓
+      - Trezor's passphrase wallet: decrypt(EMS, passphrase, id, false, ie)
+      - ERA's passphrase wallet: decrypt(stored_EMS, passphrase, id, false, ie)
+      - These are the SAME computation → same addresses ✓
+
+    This works because ERA-native shares were never extendable (Bug 2 is
+    a no-op since the shares are already non-extendable), and the empty
+    passphrase used during creation means Bug 1 doesn't corrupt the entropy.
+    """
+    passphrase = b"TREZOR"
+
+    # === Step 1: ERA creates a native SLIP39 wallet ===
+    # ERA uses extendable=false (Bug 2) and empty passphrase (Bug 1),
+    # but for ERA-NATIVE shares these are not "bugs" — they're just
+    # the parameters ERA chose.
+    era_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=False, iteration_exponent=1
+    )[0]
+    assert len(era_shares) == 5
+
+    # ERA's default wallet: the master secret itself.
+    era_default_xprv = BIP32Key.fromEntropy(MS).ExtendedKey()
+
+    # ERA's passphrase wallet: decrypt(EMS, passphrase).
+    era_result = shamir.simulate_era_import(era_shares[:3], passphrase=passphrase)
+    era_passphrase_xprv = BIP32Key.fromEntropy(
+        era_result.passphrase_seed
+    ).ExtendedKey()
+
+    # === Step 2: Import ERA shares into Trezor ===
+    # Trezor recovers the EMS from shares and stores it.
+    # This models Trezor's import path: decode_mnemonics → recover_ems → store.
+    groups = shamir.decode_mnemonics(era_shares[:3])
+    trezor_ems = shamir.recover_ems(groups)
+
+    # Trezor's no-passphrase wallet: decrypt(stored_EMS, "").
+    trezor_default_seed = trezor_ems.decrypt(b"")
+    trezor_default_xprv = BIP32Key.fromEntropy(trezor_default_seed).ExtendedKey()
+
+    # === Step 3: User enables passphrase on the Trezor ===
+    # Trezor's passphrase wallet: decrypt(stored_EMS, passphrase).
+    trezor_passphrase_seed = trezor_ems.decrypt(passphrase)
+    trezor_passphrase_xprv = BIP32Key.fromEntropy(
+        trezor_passphrase_seed
+    ).ExtendedKey()
+
+    # === Step 4: Verify — ERA and Trezor AGREE ===
+    # Default wallets match.
+    assert trezor_default_xprv == era_default_xprv, (
+        "ERA→Trezor: default (no-passphrase) addresses MATCH."
+    )
+
+    # Passphrase wallets ALSO match — this is the key result.
+    assert trezor_passphrase_xprv == era_passphrase_xprv, (
+        "ERA→Trezor: passphrase addresses MATCH.  "
+        "Importing ERA-native shares into a Trezor and enabling a passphrase "
+        "produces the SAME addresses as ERA shows.  This direction is SAFE."
+    )
+
+    # The default and passphrase wallets are different (as expected).
+    assert trezor_default_xprv != trezor_passphrase_xprv, (
+        "Default and passphrase wallets are distinct."
+    )
+
+    # === Step 5: Also verify via combine_mnemonics (the standard recovery path) ===
+    recovered_default = shamir.combine_mnemonics(era_shares[:3], b"")
+    recovered_passphrase = shamir.combine_mnemonics(era_shares[:3], passphrase)
+    assert recovered_default == MS, "Standard recovery without passphrase = MS."
+    assert BIP32Key.fromEntropy(recovered_passphrase).ExtendedKey() == (
+        trezor_passphrase_xprv
+    ), "Standard recovery with passphrase matches Trezor."
+
+
+def test_era_reworked_shares_imported_to_trezor_with_passphrase_both_wrong():
+    """
+    Reverse direction test: ERA-REWORKED shares → imported into new Trezor → passphrase.
+
+    This is the DANGEROUS scenario the user was worried about:
+      1. Original Trezor creates extendable SLIP39 shares (no passphrase during creation)
+      2. User imports into ERA → ERA stores wrong entropy (Bug 1 + Bug 2)
+      3. ERA reworks (regenerates) shares → these shares encode wrong data
+      4. User imports ERA-reworked shares into a NEW Trezor
+      5. User enables passphrase on the new Trezor
+
+    Result: ERA and the new Trezor AGREE with each other — both show the
+    same addresses.  But BOTH differ from the original Trezor's PASSPHRASE
+    wallet.  The original passphrase-protected funds are still lost.
+
+    However, the DEFAULT wallet (no passphrase) IS preserved through the
+    ERA round-trip, because ERA's Bug 1 (decrypt with "") happens to
+    correctly recover MS when the original shares were also created with
+    empty passphrase.  So the new Trezor's no-passphrase wallet matches
+    the original Trezor's no-passphrase wallet.
+
+    This is NOT a NEW bug in the ERA→Trezor direction.  It's the SAME
+    data corruption from the original Trezor→ERA import.  The damage was
+    done in step 2, and everything after that consistently propagates
+    the wrong data.
+    """
+    passphrase = b"TREZOR"
+
+    # === Step 1: Original Trezor creates extendable shares (no passphrase) ===
+    original_trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
+    )[0]
+
+    # What the original Trezor shows with passphrase.
+    original_trezor_passphrase_seed = shamir.combine_mnemonics(
+        original_trezor_shares[:3], passphrase
+    )
+    original_trezor_passphrase_xprv = BIP32Key.fromEntropy(
+        original_trezor_passphrase_seed
+    ).ExtendedKey()
+
+    # What the original Trezor shows without passphrase (= MS).
+    original_trezor_default_xprv = BIP32Key.fromEntropy(MS).ExtendedKey()
+
+    # === Step 2: User imports into ERA (bugs corrupt the data) ===
+    era_result = shamir.simulate_era_import(
+        original_trezor_shares[:3], passphrase=passphrase
+    )
+
+    # === Step 3: ERA reworks the shares ===
+    era_rework = shamir.simulate_era_rework(
+        original_trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+    )
+    reworked_shares = era_rework.reworked_shares
+
+    # === Step 4: Import ERA-reworked shares into a NEW Trezor ===
+    groups = shamir.decode_mnemonics(reworked_shares[:2])
+    new_trezor_ems = shamir.recover_ems(groups)
+
+    # New Trezor's no-passphrase wallet.
+    new_trezor_default_seed = new_trezor_ems.decrypt(b"")
+    new_trezor_default_xprv = BIP32Key.fromEntropy(
+        new_trezor_default_seed
+    ).ExtendedKey()
+
+    # === Step 5: User enables passphrase on the new Trezor ===
+    new_trezor_passphrase_seed = new_trezor_ems.decrypt(passphrase)
+    new_trezor_passphrase_xprv = BIP32Key.fromEntropy(
+        new_trezor_passphrase_seed
+    ).ExtendedKey()
+
+    # === Verify: ERA and new Trezor AGREE with each other ===
+    # They share the same (corrupted) data, so they derive the same wallets.
+
+    # ERA's passphrase wallet from the reworked shares.
+    era_rework_import = shamir.simulate_era_import(
+        reworked_shares[:2], passphrase=passphrase
+    )
+    era_rework_passphrase_xprv = BIP32Key.fromEntropy(
+        era_rework_import.passphrase_seed
+    ).ExtendedKey()
+    era_rework_default_xprv = BIP32Key.fromEntropy(
+        era_rework_import.no_passphrase_seed
+    ).ExtendedKey()
+
+    assert new_trezor_default_xprv == era_rework_default_xprv, (
+        "ERA and new Trezor AGREE on the default wallet (same wrong data)."
+    )
+    assert new_trezor_passphrase_xprv == era_rework_passphrase_xprv, (
+        "ERA and new Trezor AGREE on the passphrase wallet (same wrong data)."
+    )
+
+    # === But BOTH differ from the original Trezor ===
+    assert new_trezor_passphrase_xprv != original_trezor_passphrase_xprv, (
+        "New Trezor's passphrase wallet ≠ original Trezor's passphrase wallet.  "
+        "The ERA rework corrupted the data — the original funds are inaccessible "
+        "from either the new Trezor or ERA."
+    )
+
+    # The DEFAULT wallets actually MATCH — ERA's Bug 1 (decrypt with "")
+    # correctly recovers MS because the original shares were also created
+    # with empty passphrase.  The stored entropy IS correct.
+    assert new_trezor_default_xprv == original_trezor_default_xprv, (
+        "New Trezor's default wallet = original Trezor's default wallet.  "
+        "ERA preserved the no-passphrase entropy through the round-trip."
+    )
+
+    # === The new Trezor and ERA are consistently wrong for passphrase wallet ===
+    # Neither can access the original Trezor's passphrase-protected funds.
+    # But the DEFAULT wallet IS preserved through the ERA round-trip.
+    # This is NOT a new bug — it's the same data corruption from the original
+    # ERA import, now visible from the Trezor side too.
+
+    # === Original shares STILL work ===
+    original_recovered = shamir.combine_mnemonics(
+        original_trezor_shares[:3], passphrase
+    )
+    assert original_recovered == original_trezor_passphrase_seed, (
+        "Original Trezor shares still recover the correct passphrase wallet.  "
+        "Only the ERA-reworked shares are wrong."
+    )
