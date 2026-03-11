@@ -1445,7 +1445,7 @@ def test_trezor_current_extendable_no_passphrase_era_vulnerability():
     )
 
 
-def test_trezor_extendable_rework_always_wrong():
+def test_trezor_extendable_with_passphrase_rework_always_wrong():
     """
     When ERA reworks Trezor PASSPHRASE-PROTECTED extendable shares, the result
     is ALWAYS wrong regardless of whether the identifier matches, because Bug 2
@@ -1465,7 +1465,7 @@ def test_trezor_extendable_rework_always_wrong():
     ``test_trezor_extendable_no_passphrase_era_rework_is_correct()``.
 
     The ERA wallet does NOT reject the import or rework — it silently
-    produces wrong shares.  "Always fails" means the resulting wallet is
+    produces wrong shares.  "Always wrong" means the resulting wallet is
     wrong, not that ERA shows an error message.
     """
     passphrase = b"TREZOR"
