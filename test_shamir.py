@@ -1114,14 +1114,24 @@ def test_era_no_block_scenario_4_rework_with_arbitrary_identifier():
 #             backup_type = BAK_T_SLIP39_BASIC_EXT
 #         if backup_type == BAK_T_SLIP39_ADVANCED:
 #             backup_type = BAK_T_SLIP39_ADVANCED_EXT
-#     - _get_slip39_mnemonics(): for extendable → generate_random_identifier()
-#                                for non-extendable → storage_device.get_slip39_identifier()
-#     - Stores EMS (not decrypted secret): store_mnemonic_secret(secret=EMS, ...)
+#     - _compute_secret_from_entropy(): generates random bytes that ARE the EMS
+#         secret = _compute_secret_from_entropy(int_entropy, ext_entropy, msg.strength)
+#         # For SLIP-39 this is the Encrypted Master Secret
+#       No passphrase is involved — the EMS is just random bytes.
+#     - _get_slip39_mnemonics(): splits the EMS into shares via slip39.split_ems()
+#         return slip39.split_ems(group_threshold, groups, identifier, extendable,
+#                                 iteration_exponent, encrypted_master_secret)
+#       No passphrase parameter — shares are generated WITHOUT any passphrase.
+#     - set_passphrase_enabled() is called AFTER share generation:
+#         storage_device.set_passphrase_enabled(bool(msg.passphrase_protection))
+#       The passphrase is an independent feature set after the EMS and shares exist.
+#     - Stores the EMS: store_mnemonic_secret(secret=secret, ...)
 #
 #   core/src/apps/common/mnemonic.py
-#     - get_seed(): correctly decrypts EMS with user passphrase:
+#     - get_seed(): the ONLY place the passphrase is used — during seed derivation:
 #         seed = slip39.decrypt(mnemonic_secret, passphrase.encode(),
 #                               iteration_exponent, identifier, extendable, ...)
+#       This is called when the user opens the wallet, NOT during share generation.
 #
 #   core/src/apps/management/recovery_device/homescreen.py
 #     - _finish_recovery(): stores identifier and iteration_exponent from recovered shares
@@ -1133,6 +1143,12 @@ def test_era_no_block_scenario_4_rework_with_arbitrary_identifier():
 #   3. Trezor PREVIOUSLY generated non-extendable SLIP39 shares (before force-extendable)
 #   4. Trezor correctly uses user passphrase for seed derivation (NOT hardcoded to "")
 #   5. Trezor stores the EMS (not decrypted entropy) — the reference implementation
+#   6. Trezor NEVER uses a passphrase when generating SLIP39 shares:
+#        - _compute_secret_from_entropy() generates random bytes = the EMS
+#        - _get_slip39_mnemonics() splits the EMS via split_ems() — no passphrase
+#        - set_passphrase_enabled() is called AFTER the EMS and shares are created
+#        - The passphrase is ONLY used in get_seed() when deriving the actual seed
+#        - The same shares serve ANY passphrase — the passphrase is a post-hoc feature
 #
 # Vulnerability to ERA wallet:
 #   - Trezor itself is NOT vulnerable (correct implementation)
@@ -1142,6 +1158,112 @@ def test_era_no_block_scenario_4_rework_with_arbitrary_identifier():
 #   - Current extendable shares: ERA Bug 2 (extendable hardcoded False) changes the
 #     salt, breaking the Feistel round-trip — BOTH wallets produce wrong addresses
 # ---------------------------------------------------------------------------
+
+
+def test_trezor_passphrase_not_used_during_slip39_generation():
+    """
+    Verify that Trezor firmware NEVER uses a passphrase when generating SLIP39
+    mnemonic shares.  The passphrase is only applied afterwards, during seed
+    derivation.
+
+    Trezor firmware reference (core/src/apps/management/reset_device/__init__.py):
+
+      reset_device():
+        secret = _compute_secret_from_entropy(int_entropy, ext_entropy, msg.strength)
+        # For SLIP-39 this is the Encrypted Master Secret
+        # ↑ "secret" is just random bytes — no passphrase involved
+
+      _get_slip39_mnemonics(encrypted_master_secret, ...):
+        return slip39.split_ems(group_threshold, groups, identifier, extendable,
+                                iteration_exponent, encrypted_master_secret)
+        # ↑ Splits the EMS into shares.  No passphrase parameter at all.
+
+      # Passphrase is set AFTER share generation:
+      storage_device.set_passphrase_enabled(bool(msg.passphrase_protection))
+
+    Trezor firmware reference (core/src/apps/common/mnemonic.py):
+
+      get_seed(passphrase=""):
+        seed = slip39.decrypt(mnemonic_secret, passphrase.encode(), ...)
+        # ↑ This is the ONLY place the passphrase is used.
+        #   It's called when the user opens the wallet, NOT during backup.
+
+    This means:
+      - The EMS is generated as random bytes (no passphrase encryption)
+      - The EMS is split into shares via split_ems() (no passphrase)
+      - The passphrase is only used later in get_seed() → decrypt(EMS, passphrase)
+      - The same shares serve ANY passphrase — including "" (empty)
+      - Enabling/disabling passphrase on the Trezor does NOT change the shares
+
+    This test models Trezor's actual flow using split_ems() directly, rather
+    than generate_mnemonics() which combines encryption + splitting.
+    """
+    # === Step 1: Trezor generates random bytes = the EMS ===
+    # In the firmware: _compute_secret_from_entropy() → random 16 or 32 bytes.
+    # There is NO passphrase involved in this step.
+    random_ems_bytes = secrets.token_bytes(16)
+
+    # === Step 2: Trezor creates an EncryptedMasterSecret for splitting ===
+    # In the firmware: identifier comes from generate_random_identifier().
+    # The EMS object wraps the raw bytes with metadata — no passphrase.
+    identifier = 42
+    ems = shamir.EncryptedMasterSecret(
+        identifier=identifier,
+        extendable=True,  # Current firmware forces extendable
+        iteration_exponent=1,
+        ciphertext=random_ems_bytes,
+    )
+
+    # === Step 3: Trezor splits the EMS into shares — NO passphrase ===
+    # In the firmware: _get_slip39_mnemonics() calls slip39.split_ems().
+    # There is no passphrase parameter in split_ems().
+    shares = shamir.split_ems(1, [(3, 5)], ems)
+    trezor_share_mnemonics = [s.mnemonic() for s in shares[0]]
+    assert len(trezor_share_mnemonics) == 5, (
+        "Trezor produces 5 shares from the EMS without using any passphrase."
+    )
+
+    # === Step 4: Passphrase is applied AFTERWARDS, during seed derivation ===
+    # In the firmware: get_seed() → slip39.decrypt(ems, passphrase)
+    passphrase = b"TREZOR"
+    seed_with_passphrase = ems.decrypt(passphrase)
+    seed_without_passphrase = ems.decrypt(b"")
+
+    # Different passphrases → different seeds from the SAME shares.
+    assert seed_with_passphrase != seed_without_passphrase, (
+        "Same EMS (same shares) produces different seeds with different passphrases. "
+        "The passphrase is NOT baked into the shares — it's applied post-hoc."
+    )
+
+    # === Step 5: Recovering shares gives back the SAME EMS regardless of passphrase ===
+    groups = shamir.decode_mnemonics(trezor_share_mnemonics[:3])
+    recovered_ems = shamir.recover_ems(groups)
+    assert recovered_ems.ciphertext == random_ems_bytes, (
+        "Share recovery gives back the original EMS bytes — "
+        "the passphrase is not involved in share recovery."
+    )
+
+    # Decrypting the recovered EMS with the passphrase gives the same seed.
+    assert recovered_ems.decrypt(passphrase) == seed_with_passphrase
+    assert recovered_ems.decrypt(b"") == seed_without_passphrase
+
+    # === Step 6: ERA import on these shares ===
+    # ERA's Bug 1: always decrypts with empty passphrase.
+    # ERA gets seed_without_passphrase, not seed_with_passphrase.
+    era_result = shamir.simulate_era_import(
+        trezor_share_mnemonics[:3], passphrase=passphrase
+    )
+
+    # ERA's stored entropy = decrypt(EMS, "").
+    # For extendable shares, Bug 2 changes the salt, so even this is wrong.
+    # But the key point: ERA never knows a passphrase was involved.
+    assert era_result.correct_master_secret == seed_with_passphrase, (
+        "A compliant tool with the passphrase recovers the correct seed."
+    )
+    assert era_result.no_passphrase_seed != seed_with_passphrase, (
+        "ERA's default view shows a different (wrong) seed because it "
+        "decrypts the EMS with empty passphrase instead of the user's passphrase."
+    )
 
 
 def test_trezor_nonextendable_shares_correctly_implemented():
@@ -1890,19 +2012,26 @@ def test_era_import_acceptance_vs_correctness_matrix():
 #   "What do I do on my Trezor to create a SLIP39 backup that will
 #    import incorrectly into the ERA wallet?"
 #
+# IMPORTANT: The Trezor firmware NEVER uses a passphrase when generating
+# SLIP39 shares.  The passphrase is a completely separate feature that is
+# only applied afterwards, during seed derivation (get_seed()).
+# See test_trezor_passphrase_not_used_during_slip39_generation() for proof.
+#
 # Workflow A (INCORRECT import — the dangerous path):
-#   1. On Trezor: create wallet with SLIP39 backup
-#   2. On Trezor: enable passphrase feature
-#   3. Import shares into ERA wallet
-#   4. ERA accepts — but ALL addresses are silently wrong
-#   5. ERA offers rework — reworked shares are also wrong
+#   1. On Trezor: create wallet → random EMS is generated (no passphrase)
+#   2. On Trezor: create SLIP39 backup → EMS is split into shares (no passphrase)
+#   3. On Trezor: enable passphrase feature (applied later during seed derivation)
+#   4. Import shares into ERA wallet
+#   5. ERA accepts — but ALL addresses are silently wrong
+#   6. ERA offers rework — reworked shares are also wrong
 #
 # Workflow B (CORRECT import — the safe path):
-#   1. On Trezor: create wallet with SLIP39 backup
-#   2. Do NOT enable passphrase
-#   3. Import shares into ERA wallet
-#   4. ERA accepts — addresses are correct
-#   5. ERA offers rework — reworked shares are also correct
+#   1. On Trezor: create wallet → random EMS is generated (no passphrase)
+#   2. On Trezor: create SLIP39 backup → EMS is split into shares (no passphrase)
+#   3. Do NOT enable passphrase
+#   4. Import shares into ERA wallet
+#   5. ERA accepts — addresses are correct
+#   6. ERA offers rework — reworked shares are also correct
 # ---------------------------------------------------------------------------
 
 
@@ -1914,22 +2043,34 @@ def test_workflow_trezor_slip39_that_imports_wrong_into_era():
     This answers: "Can you give me the workflow for creating a SLIP39 backup
     on an existing Trezor that will import incorrectly into the ERA wallet?"
 
+    IMPORTANT: The Trezor firmware NEVER uses a passphrase when generating
+    SLIP39 shares.  The EMS is generated as random bytes and split into shares
+    without any passphrase involvement.  The passphrase is only applied later
+    when deriving the seed (get_seed() → decrypt(EMS, passphrase)).
+
     WORKFLOW (real-world steps → code equivalent):
 
     Step 1 — Create or restore a wallet on your Trezor
-      The Trezor generates a random master secret internally.
-      → MS = b"ABCDEFGHIJKLMNOP"  (our test stand-in)
+      The Trezor generates random bytes that become the EMS (Encrypted Master
+      Secret).  No passphrase is involved — the EMS is just random bytes.
+      → MS = b"ABCDEFGHIJKLMNOP"  (our test stand-in for what the Trezor
+        would derive as the seed when a passphrase is used later)
 
     Step 2 — Create a SLIP39 backup on the Trezor
       Current Trezor firmware FORCES extendable backup (since firmware 2.7.0+).
-      The Trezor encrypts the master secret into an EMS and splits it into
-      shares using Shamir's Secret Sharing.
+      The Trezor splits the random EMS into shares using Shamir's Secret
+      Sharing.  The passphrase is NOT used during this step.
       → generate_mnemonics(..., extendable=True)
+      (Note: generate_mnemonics encrypts+splits, but Trezor's actual code
+       generates random EMS and calls split_ems() directly — no passphrase.
+       The end result is equivalent for the ERA import analysis.)
 
     Step 3 — Enable passphrase on the Trezor
       In Trezor Settings → Security → Passphrase, enable passphrase.
-      Enter a passphrase like "TREZOR".  The Trezor uses this passphrase
-      to decrypt the EMS → master secret → BIP32 seed → addresses.
+      This sets a flag: storage_device.set_passphrase_enabled(True).
+      The passphrase was NOT used during share generation (Steps 1-2).
+      The passphrase is only used when the Trezor derives the seed:
+        get_seed() → slip39.decrypt(EMS, passphrase.encode(), ...)
       → passphrase = b"TREZOR"
       THIS IS THE TRIGGER.  Without this step, ERA import works correctly.
 
@@ -1954,10 +2095,18 @@ def test_workflow_trezor_slip39_that_imports_wrong_into_era():
     The original passphrase-protected wallet is silently inaccessible via ERA.
     The original Trezor shares still work correctly on the Trezor itself.
     """
-    # Step 1: Master secret (what the Trezor stores internally).
+    # Step 1: Master secret (what the Trezor derives when using the passphrase).
+    # In real Trezor firmware, the EMS is random bytes and the "master secret"
+    # is decrypt(random_EMS, passphrase).  Our generate_mnemonics() encodes the
+    # same relationship: combine_mnemonics(shares, passphrase) → MS.
     master_secret = MS
 
     # Step 2: Trezor creates SLIP39 backup (current firmware forces extendable).
+    # Note: In the actual Trezor firmware, this step does NOT use the passphrase.
+    # The Trezor generates random EMS bytes and calls split_ems() directly.
+    # We use generate_mnemonics() here because it produces equivalent shares
+    # (same EMS, same split) — the passphrase just determines the master_secret↔EMS
+    # relationship, which is what we need for the ERA import comparison.
     passphrase = b"TREZOR"
     trezor_shares = shamir.generate_mnemonics(
         1, [(3, 5)], master_secret, passphrase, extendable=True, iteration_exponent=1
@@ -1965,8 +2114,11 @@ def test_workflow_trezor_slip39_that_imports_wrong_into_era():
     # The user writes down 5 shares on paper, e.g. "academic acid acrobat..."
     assert len(trezor_shares) == 5
 
-    # Step 3: Passphrase is set on Trezor.  The Trezor derives addresses by
-    # decrypting EMS with the passphrase.  Let's record what the Trezor shows.
+    # Step 3: Passphrase is applied on Trezor AFTER shares already exist.
+    # In Trezor firmware: set_passphrase_enabled(True) is called after share generation.
+    # The Trezor derives addresses by decrypting the EMS with the passphrase:
+    #   get_seed() → slip39.decrypt(stored_EMS, passphrase.encode(), ...)
+    # The passphrase was NOT used when creating the shares in Step 2.
     trezor_xprv = BIP32Key.fromEntropy(master_secret).ExtendedKey()
 
     # Step 4: User imports 3 of 5 shares into ERA wallet.
@@ -2024,14 +2176,17 @@ def test_workflow_trezor_slip39_that_imports_correctly_into_era():
     WORKFLOW (real-world steps → code equivalent):
 
     Step 1 — Create or restore a wallet on your Trezor
+      The Trezor generates random EMS bytes.  No passphrase is involved.
       → MS = b"ABCDEFGHIJKLMNOP"
 
     Step 2 — Create a SLIP39 backup on the Trezor
       Current firmware forces extendable backup.
+      The EMS is split into shares — no passphrase is used.
       → generate_mnemonics(..., extendable=True)
 
     Step 3 — Do NOT enable passphrase on the Trezor
       Leave passphrase disabled (the default setting).
+      The Trezor derives the seed: get_seed("") → decrypt(EMS, "").
       → passphrase = b""
       THIS IS THE KEY DIFFERENCE.
 
@@ -2055,6 +2210,8 @@ def test_workflow_trezor_slip39_that_imports_correctly_into_era():
     master_secret = MS
 
     # Step 2: Trezor creates SLIP39 backup (extendable, NO passphrase).
+    # The Trezor generates random EMS and splits it via split_ems() — no passphrase.
+    # We use generate_mnemonics() with b"" which is equivalent.
     trezor_shares = shamir.generate_mnemonics(
         1, [(3, 5)], master_secret, b"", extendable=True, iteration_exponent=1
     )[0]
