@@ -240,3 +240,75 @@ def test_recover_ems():
     encrypted_master_secret = shamir.recover_ems(groups)
     recovered = encrypted_master_secret.decrypt(b"TREZOR")
     assert recovered == MS
+
+
+def test_resplit_non_extendable():
+    """Non-extendable shares can be safely re-split when the identifier is preserved.
+
+    Because resplit_mnemonics recovers the EMS (which includes the original identifier)
+    and re-splits it, the encryption salt stays the same, and the new shares decrypt to
+    the same master secret with any passphrase.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-split into a different group configuration.
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+
+    # New shares recover the same master secret with the correct passphrase.
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+
+def test_resplit_extendable():
+    """Extendable shares can also be re-split."""
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[0]
+
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+
+def test_resplit_non_extendable_wrong_passphrase_consistency():
+    """After re-splitting non-extendable shares (preserving identifier), the new shares
+    produce the same result as the original shares for any passphrase, including a wrong
+    one. This is because the identifier (and therefore the encryption salt) is preserved.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+
+    # Correct passphrase: both yield the original master secret.
+    assert MS == shamir.combine_mnemonics(original[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+    # Wrong (empty) passphrase: both yield the same (incorrect) secret,
+    # because the identifier and salt are preserved.
+    wrong_pw_original = shamir.combine_mnemonics(original[:3])
+    wrong_pw_new = shamir.combine_mnemonics(new_shares[0][:2])
+    assert wrong_pw_original != MS
+    assert wrong_pw_new != MS
+    assert wrong_pw_original == wrong_pw_new
+
+
+def test_resplit_non_extendable_different_group_structure():
+    """Re-splitting non-extendable shares into a more complex group structure works
+    correctly and preserves decryption consistency.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-split into 2-of-3 groups with different member thresholds.
+    new_shares = shamir.resplit_mnemonics(original[:3], 2, [(2, 3), (3, 5), (1, 1)])
+
+    # Recover using group 0 + group 2.
+    assert MS == shamir.combine_mnemonics(
+        new_shares[0][:2] + new_shares[2][:1], b"TREZOR"
+    )
+
+    # Recover using group 1 + group 2.
+    assert MS == shamir.combine_mnemonics(
+        new_shares[1][:3] + new_shares[2][:1], b"TREZOR"
+    )

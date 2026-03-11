@@ -471,6 +471,43 @@ def recover_ems(groups: Dict[int, ShareGroup]) -> EncryptedMasterSecret:
     )
 
 
+def resplit_mnemonics(
+    mnemonics: Iterable[str],
+    group_threshold: int,
+    groups: Sequence[Tuple[int, int]],
+) -> List[List[str]]:
+    """
+    Recover the Encrypted Master Secret from existing mnemonics and re-split it into
+    a new set of shares with a potentially different group configuration.
+
+    This preserves the original identifier, extendable flag, and iteration exponent.
+    Because the identifier is preserved, the encryption salt remains the same, and the
+    new shares will decrypt to the same master secret with any passphrase — including
+    both the correct passphrase and any wrong passphrase.
+
+    This is particularly important for non-extendable shares: normally, calling
+    ``generate_mnemonics`` again would pick a new random identifier, changing the
+    encryption salt and causing wrong-passphrase results to differ between share sets.
+    By using ``resplit_mnemonics``, the identifier is kept, so the re-split is safe.
+
+    .. note::
+        The new shares form an independent set. Shares from the old and new sets
+        cannot be mixed together for recovery.
+
+    :param mnemonics: List of mnemonics (enough to meet the original threshold).
+    :param group_threshold: The number of groups required to reconstruct the master secret.
+    :param groups: A list of (member_threshold, member_count) pairs for each group.
+    :return: List of groups of mnemonics.
+    """
+    if not mnemonics:
+        raise MnemonicError("The list of mnemonics is empty.")
+
+    decoded_groups = decode_mnemonics(mnemonics)
+    encrypted_master_secret = recover_ems(decoded_groups)
+    grouped_shares = split_ems(group_threshold, groups, encrypted_master_secret)
+    return [[share.mnemonic() for share in group] for group in grouped_shares]
+
+
 def combine_mnemonics(mnemonics: Iterable[str], passphrase: bytes = b"") -> bytes:
     """
     Combine mnemonic shares to obtain the master secret which was previously split
