@@ -204,6 +204,40 @@ def test_decode_cli():
     assert "Member threshold:" in result.output
     assert "Share value:" in result.output
     assert "All shares belong to the same set." in result.output
+    assert "Encrypted Master Secret (EMS):" in result.output
+    assert "Master Secret" in result.output
+
+
+def test_decode_cli_recovery():
+    """Test that decode recovers the correct master secret when given a complete set."""
+    mnemonics = shamir.generate_mnemonics(1, [(2, 3)], MS)[0]
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", mnemonics[0], mnemonics[1]])
+    assert result.exit_code == 0
+    assert MS.hex() in result.output
+
+
+def test_decode_cli_recovery_passphrase():
+    """Test that decode recovers the correct master secret with a passphrase."""
+    mnemonics = shamir.generate_mnemonics(1, [(2, 3)], MS, b"TREZOR")[0]
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", "-p", "TREZOR", mnemonics[0], mnemonics[1]])
+    assert result.exit_code == 0
+    assert MS.hex() in result.output
+
+
+def test_decode_cli_non_extendable_shows_both():
+    """Test that non-extendable shares show decryption with both salt modes."""
+    mnemonics = shamir.generate_mnemonics(1, [(2, 3)], MS, extendable=False)[0]
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", mnemonics[0], mnemonics[1]])
+    assert result.exit_code == 0
+    assert "extendable=False" in result.output
+    assert "extendable=True" in result.output
+    assert MS.hex() in result.output
 
 
 def test_decode_cli_single_share():

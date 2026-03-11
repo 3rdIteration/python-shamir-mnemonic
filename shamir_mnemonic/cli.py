@@ -12,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import ShareGroup, generate_mnemonics
+from .shamir import ShareGroup, generate_mnemonics, recover_ems
 from .share import Share
 from .utils import MnemonicError
 
@@ -156,8 +156,15 @@ def create(
 
 @cli.command()
 @click.argument("mnemonics", nargs=-1, required=True)
-def decode(mnemonics: Sequence[str]) -> None:
+@click.option("-p", "--passphrase", default="", help="Passphrase for decryption.")
+def decode(mnemonics: Sequence[str], passphrase: str) -> None:
     """Decode one or more SLIP-39 share mnemonics and display their internal data.
+
+    When enough shares are provided to complete recovery, the Encrypted Master
+    Secret and the decrypted Master Secret are shown as well. Because some
+    hardware wallets mark shares as non-extendable but actually use extendable
+    (empty) salt, recovery is attempted both ways when the extendable flag is
+    False.
 
     Each MNEMONIC is a space-separated sequence of words enclosed in quotes.
 
@@ -166,6 +173,11 @@ def decode(mnemonics: Sequence[str]) -> None:
     \b
     shamir decode "word1 word2 word3 ..." "word1 word2 word3 ..."
     """
+    try:
+        passphrase_bytes = passphrase.encode("ascii")
+    except UnicodeDecodeError:
+        raise click.ClickException("Passphrase must be ASCII only")
+
     shares = []
     for i, mnemonic in enumerate(mnemonics, 1):
         click.echo(style(f"Share #{i}:", bold=True))
@@ -230,6 +242,43 @@ def decode(mnemonics: Sequence[str]) -> None:
             )
     except MnemonicError:
         pass
+
+    # Attempt recovery when shares form a complete set
+    try:
+        ems = recover_ems(groups)
+    except MnemonicError:
+        return
+
+    click.echo()
+    click.echo(style("Recovery:", bold=True))
+    click.echo(
+        f"  {style('Encrypted Master Secret (EMS):', fg='cyan')} "
+        f"{ems.ciphertext.hex()}"
+    )
+
+    master_secret = ems.decrypt(passphrase_bytes)
+    click.echo(
+        f"  {style('Master Secret (decrypted, extendable=' + str(ems.extendable) + '):', fg='cyan')} "
+        f"{master_secret.hex()}"
+    )
+
+    # If shares are marked non-extendable, also try with extendable (empty)
+    # salt.  Some hardware wallets have a bug where shares are flagged as
+    # non-extendable but were actually encrypted with an empty salt.
+    if not ems.extendable:
+        from . import cipher
+
+        alt_secret = cipher.decrypt(
+            ems.ciphertext,
+            passphrase_bytes,
+            ems.iteration_exponent,
+            ems.identifier,
+            True,  # pretend extendable
+        )
+        click.echo(
+            f"  {style('Master Secret (decrypted, extendable=True):', fg='cyan')} "
+            f"{alt_secret.hex()}"
+        )
 
 
 FINISHED = style("\u2713", fg="green", bold=True)
