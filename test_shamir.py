@@ -437,8 +437,6 @@ def test_verify_detects_wrong_salt_mode():
     )
 
     # ...but create shares marked as NON-EXTENDABLE (wrong flag).
-    from shamir_mnemonic.share import Share
-
     buggy_shares = shamir.split_ems(
         1,
         [(3, 5)],
