@@ -2365,3 +2365,183 @@ def test_trezor_safe_7_with_passphrase_era_gives_different_addresses():
         "Confirmed: ERA shows different addresses than Trezor Safe 7 when "
         "SLIP39 shares are imported with a passphrase."
     )
+
+
+# ---------------------------------------------------------------------------
+# Confirmed user-reported fault: default OK, passphrase wrong, fund loss
+# ---------------------------------------------------------------------------
+# A user reported:
+#   "I found a fault. If I create a SLIP39 share (or set) on a Trezor,
+#    import it in to the ERA wallet, the default address works fine.
+#    But if I enable a BIP39 passphrase, the ERA wallet shows the incorrect
+#    address for the imported wallet, and any exported share that are
+#    subsequently created.
+#    (And as you have suggested, while it would be possible to reconstruct
+#    the correct address and passphrase on the Trezor, if the user only
+#    retained the ERA-regenerated shares AND used a passphrase, the funds
+#    would be unrecoverably lost.)"
+#
+# This is a nuanced scenario: the SAME set of shares works perfectly in
+# ERA's default (no-passphrase) view, but enabling a passphrase produces
+# silently wrong addresses.  This makes the fault especially dangerous
+# because the user sees correct behavior first, builds trust in ERA, and
+# then loses access to the passphrase wallet.
+#
+# Why the default address works:
+#   ERA Bug 1 (decrypt with "") produces the correct no-passphrase seed.
+#   ERA Bug 2 (extendable=False) changes the Feistel salt, but the
+#   round-trip encrypt(seed,"")/decrypt(ems,"") is self-consistent.
+#
+# Why the passphrase address fails:
+#   When the user enters a passphrase in ERA, it calls decrypt(stored_ems,
+#   passphrase) — but stored_ems was encrypted with the WRONG salt (Bug 2:
+#   non-extendable salt instead of extendable empty salt).  The Feistel
+#   cipher with a different passphrase on a different salt produces a
+#   completely different seed.
+#
+# Why ERA-reworked shares lose funds:
+#   ERA stored the correct no-passphrase entropy (MS), so reworked shares
+#   DO recover MS without passphrase.  But the passphrase wallet's seed
+#   (decrypt(original_EMS, passphrase)) is NOT recoverable from the
+#   reworked shares because they use a different salt.  If the user
+#   discards the original Trezor shares and only keeps ERA's reworked
+#   shares, the passphrase wallet is permanently inaccessible.
+# ---------------------------------------------------------------------------
+
+
+def test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost():
+    """
+    Confirmed user-reported fault — complete scenario in one test:
+
+      "If I create a SLIP39 share (or set) on a Trezor, import it in to
+       the ERA wallet, the default address works fine. But if I enable a
+       BIP39 passphrase, the ERA wallet shows the incorrect address for
+       the imported wallet, and any exported share that are subsequently
+       created. [...] if the user only retained the ERA-regenerated shares
+       AND used a passphrase, the funds would be unrecoverably lost."
+
+    This test models the EXACT user scenario step by step:
+
+      1. Create SLIP39 shares on a Trezor (no passphrase during creation)
+      2. Import shares into ERA → default address is CORRECT ✓
+      3. Enable passphrase on the Trezor → ERA passphrase address is WRONG ✗
+      4. ERA regenerates shares → those shares are ALSO wrong ✗
+      5. User discards originals, keeps only ERA shares + passphrase → FUND LOSS ✗
+
+    Key difference from test_workflow_trezor_slip39_that_imports_wrong_into_era:
+      That test creates shares WITH a passphrase (generate_mnemonics(MS, "TREZOR")),
+      so ERA's default AND passphrase views are BOTH wrong.  This test creates
+      shares WITHOUT a passphrase (generate_mnemonics(MS, "")), so ERA's default
+      view is CORRECT — which is what makes this fault especially dangerous:
+      the user sees correct behavior first, builds confidence, then gets burned
+      when they enable a passphrase.
+    """
+    passphrase = b"TREZOR"
+
+    # === Step 1: Create SLIP39 shares on Trezor ===
+    # Trezor generates random EMS and splits into shares — no passphrase.
+    # We model this with generate_mnemonics(MS, b"") which is equivalent:
+    # the EMS internally = encrypt(MS, ""), and combine(shares, "") = MS.
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
+    )[0]
+    assert len(trezor_shares) == 5
+
+    # What the Trezor shows WITHOUT passphrase (default wallet).
+    trezor_default_seed = MS
+    trezor_default_xprv = BIP32Key.fromEntropy(trezor_default_seed).ExtendedKey()
+
+    # What the Trezor shows WITH passphrase "TREZOR" (passphrase wallet).
+    # This is a DIFFERENT wallet derived from the same shares.
+    trezor_passphrase_seed = shamir.combine_mnemonics(trezor_shares[:3], passphrase)
+    trezor_passphrase_xprv = BIP32Key.fromEntropy(trezor_passphrase_seed).ExtendedKey()
+
+    # Confirm: the two Trezor wallets are different.
+    assert trezor_default_xprv != trezor_passphrase_xprv, (
+        "Passphrase creates a different wallet from the same shares."
+    )
+
+    # === Step 2: Import to ERA — "the default address works fine" ===
+    era_result = shamir.simulate_era_import(trezor_shares[:3], passphrase=passphrase)
+
+    era_default_xprv = BIP32Key.fromEntropy(
+        era_result.no_passphrase_seed
+    ).ExtendedKey()
+    assert era_default_xprv == trezor_default_xprv, (
+        "The user's first observation: 'the default address works fine.' "
+        "ERA's no-passphrase view matches the Trezor's no-passphrase wallet."
+    )
+
+    # === Step 3: "But if I enable a BIP39 passphrase, the ERA wallet ===
+    #     shows the incorrect address for the imported wallet"
+    era_passphrase_xprv = BIP32Key.fromEntropy(
+        era_result.passphrase_seed
+    ).ExtendedKey()
+    assert era_passphrase_xprv != trezor_passphrase_xprv, (
+        "The user's fault: ERA passphrase addresses DON'T match the Trezor's "
+        "passphrase wallet.  Root cause: ERA Bug 2 (extendable=False) changed "
+        "the Feistel salt, so decrypt(stored_ems, passphrase) gives wrong seed."
+    )
+
+    # ERA's passphrase view doesn't match ERA's default view either — they're
+    # three distinct wallets (Trezor correct, ERA default, ERA passphrase).
+    assert era_passphrase_xprv != era_default_xprv, (
+        "ERA's passphrase view produces a third distinct wallet, matching "
+        "neither the Trezor's passphrase wallet nor the no-passphrase wallet."
+    )
+
+    # === Step 4: "and any exported share that are subsequently created" ===
+    era_rework = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+    )
+    assert len(era_rework.reworked_shares) == 3
+
+    # ERA-reworked shares cannot recover the passphrase wallet.
+    assert not era_rework.original_secret_recoverable, (
+        "ERA-regenerated shares do NOT recover the passphrase wallet's seed. "
+        "The exported shares encode ERA's stored entropy (which is the "
+        "no-passphrase seed) encrypted with the wrong salt."
+    )
+
+    # === Step 5: "if the user only retained the ERA-regenerated shares ===
+    #     AND used a passphrase, the funds would be unrecoverably lost"
+    #
+    # Scenario: user discards original Trezor shares, keeps ERA reworked
+    # shares.  User's funds are at addresses derived from trezor_passphrase_seed.
+
+    # Try to recover with passphrase → WRONG seed, funds inaccessible.
+    reworked_pp_xprv = BIP32Key.fromEntropy(
+        era_rework.recovered_with_passphrase
+    ).ExtendedKey()
+    assert reworked_pp_xprv != trezor_passphrase_xprv, (
+        "FUND LOSS: ERA-reworked shares + passphrase give DIFFERENT addresses "
+        "than the Trezor's passphrase wallet.  The funds are inaccessible."
+    )
+
+    # Try to recover without passphrase → gives the no-passphrase wallet,
+    # not the passphrase wallet.  Funds at passphrase addresses are still lost.
+    reworked_nopp_xprv = BIP32Key.fromEntropy(
+        era_rework.recovered_without_passphrase
+    ).ExtendedKey()
+    assert reworked_nopp_xprv != trezor_passphrase_xprv, (
+        "FUND LOSS: ERA-reworked shares WITHOUT passphrase also don't match "
+        "the passphrase wallet.  No combination of passphrase/no-passphrase "
+        "recovers the funds from the reworked shares."
+    )
+
+    # Note: reworked shares WITHOUT passphrase DO recover the no-passphrase
+    # wallet (MS).  But the user's funds are in the PASSPHRASE wallet.
+    assert reworked_nopp_xprv == trezor_default_xprv, (
+        "The no-passphrase wallet IS recoverable from reworked shares — but "
+        "the user's passphrase-protected funds are at different addresses."
+    )
+
+    # === The original Trezor shares still work ===
+    # If the user still has them, they can recover both wallets on the Trezor.
+    recovered_default = shamir.combine_mnemonics(trezor_shares[:3], b"")
+    recovered_passphrase = shamir.combine_mnemonics(trezor_shares[:3], passphrase)
+    assert recovered_default == trezor_default_seed
+    assert recovered_passphrase == trezor_passphrase_seed
+    # But if only ERA-reworked shares remain → passphrase wallet is lost forever.
