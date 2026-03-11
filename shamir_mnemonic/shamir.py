@@ -539,3 +539,117 @@ def verify_mnemonics(
         "The shares do not match the expected master secret with either "
         "extendable or non-extendable encryption parameters."
     )
+
+
+@dataclass(frozen=True)
+class EraImportResult:
+    """Diagnostic result from simulating ERA wallet's SLIP39 import path.
+
+    ERA wallet (ERAWLT/ERA-crypto-p) has two bugs in its SLIP39 handling:
+
+    Bug 1 — Passphrase ignored during import:
+      ``decodeShamirShares()`` and ``addAccount()`` always call
+      ``encryptedMasterSecret.decrypt("")`` regardless of any user passphrase,
+      so the stored "entropy" is wrong for passphrase-protected shares.
+
+    Bug 2 — extendable flag hardcoded False during re-encryption:
+      The ``Account`` constructor always calls
+      ``EncryptedMasterSecret::fromMasterSecret(entropy, "", id, false, ie)``
+      with ``extendable=false`` when re-encrypting for storage.
+
+    Due to the Feistel cipher round-trip property
+    ``encrypt(decrypt(ct, S), S) = ct``, when the same (empty) passphrase and
+    same salt are used for both decrypt and re-encrypt, the original ciphertext
+    is paradoxically preserved. This means the stored EMS is often identical to
+    the original, and entering the correct passphrase later may still produce
+    correct keys. However, the stored *entropy* is wrong.
+    """
+
+    stored_entropy: bytes
+    """What ERA stores as the account's entropy — wrong for passphrase-protected shares."""
+
+    stored_ems: bytes
+    """The EMS ciphertext ERA stores. Identical to the original when id/ie are preserved."""
+
+    identifier: int
+    """The SLIP39 identifier from the original shares."""
+
+    iteration_exponent: int
+    """The iteration exponent from the original shares."""
+
+    extendable: bool
+    """The extendable flag from the original shares."""
+
+    no_passphrase_seed: bytes
+    """The seed ERA derives for the no-passphrase wallet (may be wrong)."""
+
+    passphrase_seed: bytes
+    """The seed ERA derives when user enters the passphrase."""
+
+    correct_master_secret: bytes
+    """What a compliant implementation would recover with the same passphrase."""
+
+
+def simulate_era_import(
+    mnemonics: Iterable[str],
+    passphrase: bytes = b"",
+) -> EraImportResult:
+    """Simulate ERA wallet's SLIP39 import path and return diagnostic info.
+
+    This function models the exact code path in the ERA wallet
+    (``ERAWLT/ERA-crypto-p``, ``Account.cpp``) when SLIP39 shares are imported:
+
+    1. ``decodeShamirShares`` / ``addAccount`` recover the EMS from shares.
+    2. ERA decrypts the EMS with an **empty** passphrase (Bug 1) to obtain
+       the "entropy" it stores internally.
+    3. ERA re-encrypts the stored entropy with ``extendable=false`` (Bug 2)
+       and the original identifier/iteration-exponent to produce a new EMS
+       for storage.
+    4. For the no-passphrase wallet, ERA decrypts the stored EMS with ``""``.
+    5. When the user enters a passphrase, ERA decrypts the stored EMS with
+       that passphrase — this step uses ``extendable=false`` unconditionally.
+
+    :param mnemonics: SLIP39 mnemonic shares (enough to meet the threshold).
+    :param passphrase: The passphrase the user would enter in ERA wallet.
+    :return: An :class:`EraImportResult` with all intermediate values.
+    """
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Bug 1: ERA always decrypts with empty passphrase.
+    era_entropy = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    # Bug 2: ERA re-encrypts with extendable=False (hardcoded), empty passphrase.
+    era_ems = cipher.encrypt(
+        era_entropy,
+        b"",
+        ems.iteration_exponent,
+        ems.identifier,
+        False,  # ERA always uses extendable=False
+    )
+
+    # ERA's no-passphrase seed: decrypt(stored_ems, "", ie, id, False)
+    no_pp_seed = cipher.decrypt(
+        era_ems, b"", ems.iteration_exponent, ems.identifier, False
+    )
+
+    # ERA's passphrase seed: decrypt(stored_ems, passphrase, ie, id, False)
+    pp_seed = cipher.decrypt(
+        era_ems, passphrase, ems.iteration_exponent, ems.identifier, False
+    )
+
+    # What a compliant implementation would get.
+    correct_ms = ems.decrypt(passphrase)
+
+    return EraImportResult(
+        stored_entropy=era_entropy,
+        stored_ems=era_ems,
+        identifier=ems.identifier,
+        iteration_exponent=ems.iteration_exponent,
+        extendable=ems.extendable,
+        no_passphrase_seed=no_pp_seed,
+        passphrase_seed=pp_seed,
+        correct_master_secret=correct_ms,
+    )
