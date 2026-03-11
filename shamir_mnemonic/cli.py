@@ -12,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import decode_mnemonics, generate_mnemonics
+from .shamir import ShareGroup, generate_mnemonics
 from .share import Share
 from .utils import MnemonicError
 
@@ -210,9 +210,12 @@ def decode(mnemonics: Sequence[str]) -> None:
             )
         )
 
-    # Try to decode/group shares
+    # Group already-parsed shares by group index
+    groups: dict[int, ShareGroup] = {}
     try:
-        groups = decode_mnemonics(m for m in mnemonics if _try_parse(m))
+        for share in shares:
+            group = groups.setdefault(share.group_index, ShareGroup())
+            group.add(share)
         for group_index, group in sorted(groups.items()):
             gp = group.group_parameters()
             complete = group.is_complete()
@@ -227,14 +230,6 @@ def decode(mnemonics: Sequence[str]) -> None:
             )
     except MnemonicError:
         pass
-
-
-def _try_parse(mnemonic: str) -> bool:
-    try:
-        Share.from_mnemonic(mnemonic)
-        return True
-    except MnemonicError:
-        return False
 
 
 FINISHED = style("\u2713", fg="green", bold=True)
