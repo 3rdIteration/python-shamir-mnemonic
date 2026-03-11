@@ -1912,7 +1912,7 @@ def test_workflow_trezor_slip39_that_imports_wrong_into_era():
     import INCORRECTLY into the ERA wallet.
 
     This answers: "Can you give me the workflow for creating a SLIP39 backup
-    on an existing Trezor that will import incorrect into the ERA wallet?"
+    on an existing Trezor that will import incorrectly into the ERA wallet?"
 
     WORKFLOW (real-world steps → code equivalent):
 
