@@ -475,3 +475,68 @@ def combine_mnemonics(mnemonics: Iterable[str], passphrase: bytes = b"") -> byte
     groups = decode_mnemonics(mnemonics)
     encrypted_master_secret = recover_ems(groups)
     return encrypted_master_secret.decrypt(passphrase)
+
+
+def verify_mnemonics(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    expected_master_secret: bytes,
+) -> bool:
+    """
+    Verify that mnemonic shares were encrypted correctly according to their
+    declared parameters (identifier, extendable flag, iteration exponent).
+
+    This function detects shares that were created with mismatched encryption
+    parameters -- for example, shares flagged as non-extendable but encrypted
+    with an empty salt (as if extendable). Such a mismatch breaks the security
+    guarantee of non-extendable shares, making them reworkable despite being
+    marked otherwise.
+
+    :param mnemonics: List of mnemonics.
+    :param passphrase: The passphrase used to encrypt the master secret.
+    :param expected_master_secret: The known-correct master secret to verify against.
+    :return: True if the shares are correctly encrypted.
+    :raises MnemonicError: If the shares have a salt/extendable flag mismatch or
+        do not match the expected master secret.
+    """
+
+    if not mnemonics:
+        raise MnemonicError("The list of mnemonics is empty.")
+
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Decrypt using the declared parameters from the share metadata.
+    decrypted = ems.decrypt(passphrase)
+
+    if decrypted == expected_master_secret:
+        return True
+
+    # The declared parameters did not produce the expected master secret.
+    # Try decrypting with the opposite extendable flag to diagnose a
+    # specific salt mismatch (e.g. non-extendable flag but empty salt).
+    alt_ems = EncryptedMasterSecret(
+        ems.identifier, not ems.extendable, ems.iteration_exponent, ems.ciphertext
+    )
+    alt_decrypted = alt_ems.decrypt(passphrase)
+
+    if alt_decrypted == expected_master_secret:
+        if ems.extendable:
+            raise MnemonicError(
+                "Share extendable flag mismatch: shares are flagged as extendable "
+                "but were encrypted with the non-extendable salt "
+                "(customization string + identifier). "
+                "The shares will not be interoperable with compliant implementations."
+            )
+        else:
+            raise MnemonicError(
+                "Share extendable flag mismatch: shares are flagged as non-extendable "
+                "but were encrypted with an empty salt (extendable mode). "
+                "This means the non-extendable security property is not enforced -- "
+                "the shares are effectively reworkable despite being marked otherwise."
+            )
+
+    raise MnemonicError(
+        "The shares do not match the expected master secret with either "
+        "extendable or non-extendable encryption parameters."
+    )

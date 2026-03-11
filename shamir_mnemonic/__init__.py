@@ -8,6 +8,7 @@ from .shamir import (
     generate_mnemonics,
     recover_ems,
     split_ems,
+    verify_mnemonics,
 )
 from .share import Share
 from .utils import MnemonicError
@@ -20,6 +21,7 @@ __all__ = [
     "generate_mnemonics",
     "split_ems",
     "recover_ems",
+    "verify_mnemonics",
     "EncryptedMasterSecret",
     "MnemonicError",
     "Share",

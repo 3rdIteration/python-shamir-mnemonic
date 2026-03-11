@@ -181,3 +181,107 @@ def test_recover_ems():
     encrypted_master_secret = shamir.recover_ems(groups)
     recovered = encrypted_master_secret.decrypt(b"TREZOR")
     assert recovered == MS
+
+
+def test_verify_mnemonics_correct_extendable():
+    """Correctly-created extendable shares should pass verification."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, extendable=True)[0]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"", MS) is True
+
+
+def test_verify_mnemonics_correct_non_extendable():
+    """Correctly-created non-extendable shares should pass verification."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, extendable=False)[0]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"", MS) is True
+
+
+def test_verify_mnemonics_correct_with_passphrase():
+    """Correctly-created shares with passphrase should pass verification."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR")[0]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+
+
+def test_verify_mnemonics_wrong_secret():
+    """Shares that don't match the expected secret should raise an error."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS)[0]
+    with pytest.raises(MnemonicError, match="do not match the expected master secret"):
+        shamir.verify_mnemonics(mnemonics[:3], b"", b"WRONG_SECRET_12345")
+
+
+def test_verify_mnemonics_detects_non_extendable_with_empty_salt():
+    """
+    Simulate the ERAWLT-style bug: shares are flagged as non-extendable but
+    encrypted with the extendable (empty) salt. verify_mnemonics should detect
+    this mismatch and raise a specific error.
+    """
+    from shamir_mnemonic.share import Share
+
+    # Step 1: Encrypt the master secret with extendable=True (empty salt).
+    identifier = 42
+    iteration_exponent = 1
+    ems = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=True, iteration_exponent=iteration_exponent
+    )
+
+    # Step 2: Create shares but lie about extendable=False in the share metadata.
+    # This simulates the ERAWLT bug where shares are flagged non-extendable
+    # but the encryption used the extendable (empty) salt.
+    fake_ems = shamir.EncryptedMasterSecret(
+        identifier, False, iteration_exponent, ems.ciphertext
+    )
+    grouped_shares = shamir.split_ems(1, [(3, 5)], fake_ems)
+
+    # Re-encode shares with extendable=False flag (they already have it from fake_ems).
+    mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    # Step 3: verify_mnemonics should detect the mismatch.
+    with pytest.raises(
+        MnemonicError, match="flagged as non-extendable but were encrypted with an empty salt"
+    ):
+        shamir.verify_mnemonics(mnemonics[:3], b"", MS)
+
+
+def test_verify_mnemonics_detects_extendable_with_non_extendable_salt():
+    """
+    The reverse mismatch: shares flagged as extendable but encrypted with
+    non-extendable salt. verify_mnemonics should detect this too.
+    """
+    from shamir_mnemonic.share import Share
+
+    identifier = 42
+    iteration_exponent = 1
+    ems = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=False, iteration_exponent=iteration_exponent
+    )
+
+    fake_ems = shamir.EncryptedMasterSecret(
+        identifier, True, iteration_exponent, ems.ciphertext
+    )
+    grouped_shares = shamir.split_ems(1, [(3, 5)], fake_ems)
+    mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    with pytest.raises(
+        MnemonicError, match="flagged as extendable but were encrypted with the non-extendable salt"
+    ):
+        shamir.verify_mnemonics(mnemonics[:3], b"", MS)
+
+
+def test_non_extendable_salt_differs_from_extendable():
+    """
+    Verify that encryption with extendable vs non-extendable parameters
+    produces different ciphertexts, confirming the salt actually matters.
+    """
+    identifier = 42
+    iteration_exponent = 1
+
+    ems_ext = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=True, iteration_exponent=iteration_exponent
+    )
+    ems_non_ext = shamir.EncryptedMasterSecret.from_master_secret(
+        MS, b"", identifier, extendable=False, iteration_exponent=iteration_exponent
+    )
+
+    assert ems_ext.ciphertext != ems_non_ext.ciphertext, (
+        "Extendable and non-extendable encryption must produce different "
+        "ciphertexts when using the same master secret, passphrase, and identifier."
+    )
