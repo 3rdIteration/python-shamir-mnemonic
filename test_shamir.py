@@ -39,6 +39,65 @@ def test_non_extendable():
     assert MS == shamir.combine_mnemonics(mnemonics[1:4])
 
 
+def test_non_extendable_regeneration_passphrase_inconsistency():
+    """Non-extendable shares: regenerating shares for the same master secret produces
+    different results when combined with a wrong passphrase, because the random
+    identifier is included in the encryption salt.
+
+    With the correct passphrase, both sets recover the original master secret.
+    With a wrong passphrase, each set produces a different (incorrect) secret.
+    """
+    mnemonics1 = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False
+    )[0]
+    mnemonics2 = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False
+    )[0]
+
+    # Correct passphrase: both sets recover the same master secret.
+    assert MS == shamir.combine_mnemonics(mnemonics1[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(mnemonics2[:3], b"TREZOR")
+
+    # Wrong (empty) passphrase: each set produces a different incorrect secret,
+    # because the identifier differs between the two generations and is part of
+    # the encryption salt for non-extendable shares.
+    wrong_pw_result1 = shamir.combine_mnemonics(mnemonics1[:3])
+    wrong_pw_result2 = shamir.combine_mnemonics(mnemonics2[:3])
+    assert wrong_pw_result1 != MS
+    assert wrong_pw_result2 != MS
+    assert wrong_pw_result1 != wrong_pw_result2
+
+
+def test_extendable_regeneration_passphrase_consistency():
+    """Extendable shares: regenerating shares for the same master secret produces
+    the same results even when combined with a wrong passphrase, because the
+    encryption salt does not include the identifier.
+
+    This is the key advantage of extendable (reworkable) shares over non-extendable
+    (non-reworkable) ones: the derived secret is always consistent regardless of which
+    set of shares is used, for any passphrase.
+    """
+    mnemonics1 = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+    mnemonics2 = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+
+    # Correct passphrase: both sets recover the same master secret.
+    assert MS == shamir.combine_mnemonics(mnemonics1[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(mnemonics2[:3], b"TREZOR")
+
+    # Wrong (empty) passphrase: both sets produce the same (incorrect) secret,
+    # because the encryption salt is empty for extendable shares and does not
+    # depend on the identifier.
+    wrong_pw_result1 = shamir.combine_mnemonics(mnemonics1[:3])
+    wrong_pw_result2 = shamir.combine_mnemonics(mnemonics2[:3])
+    assert wrong_pw_result1 != MS
+    assert wrong_pw_result2 != MS
+    assert wrong_pw_result1 == wrong_pw_result2
+
+
 def test_iteration_exponent():
     mnemonics = shamir.generate_mnemonics(
         1, [(3, 5)], MS, b"TREZOR", iteration_exponent=1

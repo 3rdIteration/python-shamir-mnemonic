@@ -25,6 +25,15 @@ def _round_function(i: int, passphrase: bytes, e: int, salt: bytes, r: bytes) ->
 
 
 def _get_salt(identifier: int, extendable: bool) -> bytes:
+    """Return the salt for the Feistel cipher round function.
+
+    For extendable shares, the salt is empty. For non-extendable shares, the salt
+    includes the identifier, which means that re-generating shares (with a new random
+    identifier) for the same master secret will produce a different encrypted form.
+    As a result, recovering non-extendable shares with a wrong passphrase will yield
+    different incorrect secrets for each generation, whereas extendable shares will
+    always yield the same result for any given passphrase.
+    """
     if extendable:
         return bytes()
     identifier_len = bits_to_bytes(ID_LENGTH_BITS)

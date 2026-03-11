@@ -385,6 +385,21 @@ def generate_mnemonics(
         reconstruct the group secret.
     :param master_secret: The master secret to split.
     :param passphrase: The passphrase used to encrypt the master secret.
+    :param extendable: If True, the encryption salt does not include the identifier.
+        If False, the identifier is included in the salt.
+
+        .. note::
+            When ``extendable=False`` (non-extendable/non-reworkable shares), each call
+            generates a new random identifier that is included in the encryption salt.
+            This means that if shares are regenerated for the same master secret, the
+            encrypted form will differ. Recovering with the *correct* passphrase always
+            yields the same master secret, but recovering with a *wrong* passphrase will
+            produce a different (incorrect) secret for each set of shares.
+
+            When ``extendable=True`` (the default), the salt is empty and independent of
+            the identifier, so all share sets for the same master secret and passphrase
+            produce consistent results for any passphrase, correct or otherwise.
+
     :param int iteration_exponent: The encryption iteration exponent.
     :return: List of groups mnemonics.
     """
