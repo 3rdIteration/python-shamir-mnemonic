@@ -1447,17 +1447,26 @@ def test_trezor_current_extendable_no_passphrase_era_vulnerability():
 
 def test_trezor_extendable_rework_always_wrong():
     """
-    When ERA reworks Trezor extendable shares, the result is ALWAYS wrong
-    regardless of whether the identifier matches, because Bug 2 has already
-    changed the salt during import.
+    When ERA reworks Trezor PASSPHRASE-PROTECTED extendable shares, the result
+    is ALWAYS wrong regardless of whether the identifier matches, because Bug 2
+    changed the salt during import and Bug 1 stored the wrong entropy.
 
-    For extendable shares:
+    For extendable shares WITH passphrase:
     - Original salt was empty (extendable=True)
     - ERA stored EMS was encrypted with non-empty salt (extendable=False)
-    - The stored entropy is already wrong (if passphrase was used)
+    - The stored entropy is wrong (Bug 1 decrypted with "" instead of passphrase)
     - Reworking from wrong entropy with any identifier produces wrong shares
 
     This is the WORST CASE scenario: extendable + passphrase + ERA rework.
+
+    NOTE: This does NOT apply to no-passphrase extendable shares — those
+    produce correct addresses in ERA and correct reworked shares, because
+    Bug 1 is harmless when no passphrase was used.  See
+    ``test_trezor_extendable_no_passphrase_era_rework_is_correct()``.
+
+    The ERA wallet does NOT reject the import or rework — it silently
+    produces wrong shares.  "Always fails" means the resulting wallet is
+    wrong, not that ERA shows an error message.
     """
     passphrase = b"TREZOR"
 
@@ -1604,3 +1613,271 @@ def test_trezor_force_extendable_concrete_bip32_divergence():
     trezor_seed = original_ems.decrypt(passphrase)
     assert trezor_seed == MS
     assert BIP32Key.fromEntropy(trezor_seed).ExtendedKey() == correct_xprv
+
+
+# ---------------------------------------------------------------------------
+# ERA "silent acceptance" — clarifying import vs. correctness
+# ---------------------------------------------------------------------------
+# The ERA wallet NEVER rejects any SLIP39 import.  There is no error message,
+# no validation failure, no warning dialog.  ERA always:
+#   1. Decodes the shares and recovers the EMS                   ✓ works
+#   2. Decrypts with empty passphrase (Bug 1)                    ← may be wrong
+#   3. Re-encrypts with extendable=False (Bug 2)                 ← may change salt
+#   4. Stores the result and offers to show addresses / rework    ✓ always offered
+#
+# "Import accepted" does NOT mean "addresses are correct."
+# "Rework offered" does NOT mean "reworked wallet is valid."
+#
+# Whether the result is correct depends on the passphrase scenario:
+#
+#   Trezor extendable (current) + NO passphrase:
+#     Import: ✓ addresses match     Rework: ✓ wallet correct
+#   Trezor extendable (current) + WITH passphrase:
+#     Import: ✗ addresses wrong     Rework: ✗ wallet wrong (silent!)
+#   Trezor non-extendable (historical) + NO passphrase:
+#     Import: ✓ addresses match     Rework: ✓ wallet correct
+#   Trezor non-extendable (historical) + WITH passphrase:
+#     Import: ✗ default wrong,      Rework: ✓ if same identifier,
+#             ✓ passphrase view OK           ✗ if identifier changes
+# ---------------------------------------------------------------------------
+
+
+def test_era_silently_accepts_all_trezor_share_types():
+    """
+    ERA wallet NEVER rejects any Trezor SLIP39 import.
+
+    The user reported: "I imported a SLIP39 share from a current Trezor and
+    the ERA wallet did accept it and immediately offer to re-work it."
+
+    This is expected — ERA always accepts.  The question is not whether ERA
+    accepts, but whether the resulting addresses are correct.
+
+    This test demonstrates that simulate_era_import() runs without error for
+    every combination of Trezor share types and passphrase settings.
+    "Accepted" and "correct" are different things.
+    """
+    scenarios = [
+        # (extendable, passphrase, description)
+        (True, b"", "current Trezor extendable, no passphrase"),
+        (True, b"TREZOR", "current Trezor extendable, with passphrase"),
+        (False, b"", "historical Trezor non-extendable, no passphrase"),
+        (False, b"TREZOR", "historical Trezor non-extendable, with passphrase"),
+    ]
+
+    for extendable, passphrase, desc in scenarios:
+        mnemonics = shamir.generate_mnemonics(
+            1, [(3, 5)], MS, passphrase, extendable=extendable, iteration_exponent=1
+        )[0]
+
+        # ERA import ALWAYS succeeds — no exception, no error.
+        result = shamir.simulate_era_import(mnemonics[:3], passphrase=passphrase)
+
+        # ERA ALWAYS produces a stored_ems and stored_entropy.
+        assert result.stored_ems is not None, f"ERA must store EMS for: {desc}"
+        assert result.stored_entropy is not None, f"ERA must store entropy for: {desc}"
+        assert len(result.stored_ems) > 0, f"ERA stored EMS must be non-empty: {desc}"
+        assert len(result.stored_entropy) > 0, f"ERA stored entropy must be non-empty: {desc}"
+
+        # ERA ALWAYS offers to show addresses (no-passphrase seed is always computed).
+        assert result.no_passphrase_seed is not None, f"ERA computes seed for: {desc}"
+
+        # ERA rework ALWAYS succeeds too — no exception.
+        rework = shamir.simulate_era_rework(
+            mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),),
+        )
+        assert len(rework.reworked_shares) == 3, f"ERA must produce reworked shares: {desc}"
+
+
+def test_trezor_extendable_no_passphrase_era_rework_is_correct():
+    """
+    When a user imports a current Trezor extendable share WITHOUT passphrase
+    into ERA and ERA reworks it, the reworked wallet IS CORRECT.
+
+    This is the most common real-world scenario: a user creates SLIP39 shares
+    on a current Trezor (which forces extendable) without a passphrase, imports
+    into ERA, and ERA reworks the backup.  Everything works.
+
+    The reason:
+    - Bug 1 (empty passphrase): Harmless — no passphrase was used, so
+      decrypt(EMS, "") gives the correct master secret.
+    - Bug 2 (extendable=False): Changes the salt, but since ERA also
+      re-decrypts with the SAME (wrong) salt, the round-trip within ERA
+      is self-consistent.  The entropy stored by ERA is correct.
+    - Rework: ERA re-encrypts the correct entropy with a (potentially new)
+      identifier and extendable=False.  A compliant tool can recover the
+      correct master secret by combining the reworked shares with no passphrase.
+
+    "Always fails" in test_trezor_extendable_rework_always_wrong() refers ONLY
+    to the WITH-PASSPHRASE case, not this no-passphrase scenario.
+    """
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
+    )[0]
+
+    # ERA import: addresses are correct (no passphrase means Bug 1 is harmless).
+    result = shamir.simulate_era_import(mnemonics[:3], passphrase=b"")
+    assert result.stored_entropy == MS, (
+        "Without passphrase, ERA stores the correct entropy."
+    )
+    assert result.no_passphrase_seed == MS, (
+        "Without passphrase, ERA shows correct addresses."
+    )
+
+    # ERA rework: produces correct wallet.
+    rework = shamir.simulate_era_rework(
+        mnemonics[:3], passphrase=b"", rework_groups=((2, 3),),
+    )
+
+    # The reworked shares recover the original secret.
+    assert rework.original_secret_recoverable, (
+        "For no-passphrase extendable shares, ERA rework produces a valid wallet "
+        "that recovers the original master secret."
+    )
+    assert rework.recovered_without_passphrase == MS, (
+        "A compliant tool recovers the correct secret from reworked shares."
+    )
+
+    # BIP32 keys match: the reworked wallet produces the same addresses.
+    correct_xprv = BIP32Key.fromEntropy(MS).ExtendedKey()
+    reworked_xprv = BIP32Key.fromEntropy(rework.recovered_without_passphrase).ExtendedKey()
+    assert reworked_xprv == correct_xprv, (
+        "Reworked wallet from no-passphrase extendable shares produces "
+        "the same BIP32 root key as the original."
+    )
+
+
+def test_trezor_extendable_with_passphrase_era_import_accepted_addresses_wrong():
+    """
+    When a user imports a current Trezor extendable share WITH passphrase into
+    ERA, the import is ACCEPTED but ALL addresses are WRONG.
+
+    ERA does not show any error or warning.  The user sees:
+    - Default (no-passphrase) view: WRONG addresses
+    - Passphrase view: ALSO WRONG addresses (Bug 2 changed the salt)
+    - Rework option: offered, but reworked wallet is also wrong
+
+    This is what "always fails" means for extendable+passphrase shares:
+    not that ERA rejects the import, but that every address ERA shows is wrong.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    # ERA import: ACCEPTED (no error).
+    result = shamir.simulate_era_import(mnemonics[:3], passphrase=passphrase)
+
+    # But ALL addresses are wrong.
+    correct_xprv = BIP32Key.fromEntropy(MS).ExtendedKey()
+
+    # Default view: wrong.
+    assert result.no_passphrase_seed != MS, "ERA default view: wrong addresses."
+    era_default_xprv = BIP32Key.fromEntropy(result.no_passphrase_seed).ExtendedKey()
+    assert era_default_xprv != correct_xprv, (
+        "ERA default BIP32 root key diverges — user sees entirely different addresses."
+    )
+
+    # Passphrase view: ALSO wrong (Bug 2 broke the Feistel round-trip).
+    assert result.passphrase_seed != MS, "ERA passphrase view: also wrong."
+    era_pp_xprv = BIP32Key.fromEntropy(result.passphrase_seed).ExtendedKey()
+    assert era_pp_xprv != correct_xprv, (
+        "ERA passphrase BIP32 root key ALSO diverges — Bug 2 changed the salt, "
+        "so even entering the correct passphrase produces wrong addresses."
+    )
+
+    # ERA rework: also accepted, also wrong.
+    rework = shamir.simulate_era_rework(
+        mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),),
+    )
+    assert len(rework.reworked_shares) == 3, "ERA rework is offered and produces shares."
+    assert not rework.original_secret_recoverable, (
+        "Reworked shares do NOT recover the original secret — the wallet is wrong "
+        "and ERA never warned the user."
+    )
+
+
+def test_era_import_acceptance_vs_correctness_matrix():
+    """
+    Comprehensive matrix showing ERA import + rework outcomes for all Trezor
+    share types.
+
+    This directly answers the question: "I imported a SLIP39 share from a
+    current Trezor and ERA accepted it.  Does that mean it works?"
+
+    Answer: ERA always accepts.  Whether it WORKS depends on the passphrase:
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Share Type              │ Passphrase │ Import OK? │ Rework OK?     │
+    ├─────────────────────────┼────────────┼────────────┼────────────────┤
+    │ Extendable (current)    │ None       │ ✓ correct  │ ✓ correct      │
+    │ Extendable (current)    │ Any        │ ✗ wrong    │ ✗ always wrong │
+    │ Non-extendable (legacy) │ None       │ ✓ correct  │ ✓ correct      │
+    │ Non-extendable (legacy) │ Any        │ ✗/✓ (*)    │ depends (**)   │
+    └─────────────────────────┴────────────┴────────────┴────────────────┘
+
+    (*) Non-extendable + passphrase: default view wrong, passphrase view correct
+    (**) Rework correct if same identifier, wrong if identifier changes (e.g. to 0)
+
+    In ALL cases, ERA "accepts" the import without any error or warning.
+    """
+    passphrase = b"TREZOR"
+
+    # --- Extendable (current Trezor), NO passphrase ---
+    ext_no_pp = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=True, iteration_exponent=1
+    )[0]
+    ext_no_pp_result = shamir.simulate_era_import(ext_no_pp[:3], passphrase=b"")
+    ext_no_pp_rework = shamir.simulate_era_rework(ext_no_pp[:3], passphrase=b"")
+
+    assert ext_no_pp_result.no_passphrase_seed == MS, "Ext+NoPass: import ✓"
+    assert ext_no_pp_rework.original_secret_recoverable, "Ext+NoPass: rework ✓"
+
+    # --- Extendable (current Trezor), WITH passphrase ---
+    ext_pp = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+    ext_pp_result = shamir.simulate_era_import(ext_pp[:3], passphrase=passphrase)
+    ext_pp_rework = shamir.simulate_era_rework(ext_pp[:3], passphrase=passphrase)
+
+    assert ext_pp_result.no_passphrase_seed != MS, "Ext+Pass: default view ✗"
+    assert ext_pp_result.passphrase_seed != MS, "Ext+Pass: passphrase view ✗"
+    assert not ext_pp_rework.original_secret_recoverable, "Ext+Pass: rework ✗"
+
+    # --- Non-extendable (historical Trezor), NO passphrase ---
+    nonext_no_pp = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"", extendable=False, iteration_exponent=1
+    )[0]
+    nonext_no_pp_result = shamir.simulate_era_import(nonext_no_pp[:3], passphrase=b"")
+    nonext_no_pp_rework = shamir.simulate_era_rework(nonext_no_pp[:3], passphrase=b"")
+
+    assert nonext_no_pp_result.no_passphrase_seed == MS, "NonExt+NoPass: import ✓"
+    assert nonext_no_pp_rework.original_secret_recoverable, "NonExt+NoPass: rework ✓"
+
+    # --- Non-extendable (historical Trezor), WITH passphrase ---
+    nonext_pp = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+    nonext_pp_result = shamir.simulate_era_import(nonext_pp[:3], passphrase=passphrase)
+
+    assert nonext_pp_result.no_passphrase_seed != MS, "NonExt+Pass: default view ✗"
+    assert nonext_pp_result.passphrase_seed == MS, "NonExt+Pass: passphrase view ✓"
+
+    # Rework with same identifier: passphrase wallet survives.
+    nonext_pp_rework_same = shamir.simulate_era_rework(
+        nonext_pp[:3], passphrase=passphrase, rework_groups=((2, 3),),
+    )
+    assert nonext_pp_rework_same.original_secret_recoverable, (
+        "NonExt+Pass: rework ✓ (same id)"
+    )
+
+    # Rework with different identifier: passphrase wallet destroyed.
+    nonext_pp_rework_diff = shamir.simulate_era_rework(
+        nonext_pp[:3], passphrase=passphrase, rework_groups=((2, 3),),
+        new_identifier=0,
+    )
+    # Only fails if the original identifier was not 0.
+    if nonext_pp_rework_diff.original_identifier != 0:
+        assert not nonext_pp_rework_diff.original_secret_recoverable, (
+            "NonExt+Pass: rework ✗ (different id destroys passphrase wallet)"
+        )
