@@ -186,19 +186,19 @@ def test_recover_ems():
 def test_verify_mnemonics_correct_extendable():
     """Correctly-created extendable shares should pass verification."""
     mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, extendable=True)[0]
-    assert shamir.verify_mnemonics(mnemonics[:3], b"", MS) is True
+    shamir.verify_mnemonics(mnemonics[:3], b"", MS)
 
 
 def test_verify_mnemonics_correct_non_extendable():
     """Correctly-created non-extendable shares should pass verification."""
     mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, extendable=False)[0]
-    assert shamir.verify_mnemonics(mnemonics[:3], b"", MS) is True
+    shamir.verify_mnemonics(mnemonics[:3], b"", MS)
 
 
 def test_verify_mnemonics_correct_with_passphrase():
     """Correctly-created shares with passphrase should pass verification."""
     mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR")[0]
-    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+    shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS)
 
 
 def test_verify_mnemonics_wrong_secret():
@@ -214,8 +214,6 @@ def test_verify_mnemonics_detects_non_extendable_with_empty_salt():
     encrypted with the extendable (empty) salt. verify_mnemonics should detect
     this mismatch and raise a specific error.
     """
-    from shamir_mnemonic.share import Share
-
     # Step 1: Encrypt the master secret with extendable=True (empty salt).
     identifier = 42
     iteration_exponent = 1
@@ -246,8 +244,6 @@ def test_verify_mnemonics_detects_extendable_with_non_extendable_salt():
     The reverse mismatch: shares flagged as extendable but encrypted with
     non-extendable salt. verify_mnemonics should detect this too.
     """
-    from shamir_mnemonic.share import Share
-
     identifier = 42
     iteration_exponent = 1
     ems = shamir.EncryptedMasterSecret.from_master_secret(

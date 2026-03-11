@@ -481,7 +481,7 @@ def verify_mnemonics(
     mnemonics: Iterable[str],
     passphrase: bytes,
     expected_master_secret: bytes,
-) -> bool:
+) -> None:
     """
     Verify that mnemonic shares were encrypted correctly according to their
     declared parameters (identifier, extendable flag, iteration exponent).
@@ -495,7 +495,6 @@ def verify_mnemonics(
     :param mnemonics: List of mnemonics.
     :param passphrase: The passphrase used to encrypt the master secret.
     :param expected_master_secret: The known-correct master secret to verify against.
-    :return: True if the shares are correctly encrypted.
     :raises MnemonicError: If the shares have a salt/extendable flag mismatch or
         do not match the expected master secret.
     """
@@ -510,7 +509,7 @@ def verify_mnemonics(
     decrypted = ems.decrypt(passphrase)
 
     if decrypted == expected_master_secret:
-        return True
+        return
 
     # The declared parameters did not produce the expected master secret.
     # Try decrypting with the opposite extendable flag to diagnose a
