@@ -653,3 +653,137 @@ def simulate_era_import(
         passphrase_seed=pp_seed,
         correct_master_secret=correct_ms,
     )
+
+
+@dataclass(frozen=True)
+class EraReworkResult:
+    """Diagnostic result from simulating ERA wallet's SLIP39 rework (backup regeneration).
+
+    When the ERA wallet regenerates SLIP39 shares (e.g. to change threshold or
+    share count), it follows this path (``CryptoModule::createMnemonic`` →
+    ``AccountsManager::generateMnemonicSLIP39``):
+
+    1. Read the stored entropy from the account's ``AccountSecureData``.
+    2. Call ``generateMnemonics(1, groups, entropy, "", identifier, false, ie)``
+       with the stored identifier from ``getSlip39Identifier()`` and stored
+       iteration exponent from ``getSlip39IterationExponent()``.
+
+    **There is no validation or blocking** in the ERA wallet code to prevent
+    rework of passphrase-protected shares.  The code does not:
+    - Check whether the stored entropy was derived with a passphrase
+    - Warn the user that rework with wrong entropy will produce bad shares
+    - Preserve the original EMS ciphertext during rework
+
+    The ``createMnemonic`` function receives the identifier and iteration
+    exponent from ``CryptoModule::getAccountSlip39Identifier()`` and
+    ``CryptoModule::getAccountSlip39IterationExponent()``.  If the account
+    has no active session (``_getActiveAccount({})`` returns null), these
+    functions return **0**, which means a different (zero) identifier could
+    be used silently — breaking the Feistel round-trip property.
+    """
+
+    original_identifier: int
+    """The SLIP39 identifier from the original shares."""
+
+    rework_identifier: int
+    """The identifier used during rework (may differ if account session is lost)."""
+
+    stored_entropy: bytes
+    """What ERA stored as entropy (wrong for passphrase-protected shares)."""
+
+    reworked_ems: bytes
+    """The EMS ciphertext in the reworked shares."""
+
+    reworked_shares: List[str]
+    """The mnemonic shares produced by the rework."""
+
+    recovered_with_passphrase: bytes
+    """What a compliant tool recovers from reworked shares WITH the original passphrase."""
+
+    recovered_without_passphrase: bytes
+    """What a compliant tool recovers from reworked shares WITHOUT passphrase."""
+
+    original_secret_recoverable: bool
+    """Whether the original master secret can be recovered from the reworked shares."""
+
+
+def simulate_era_rework(
+    mnemonics: Iterable[str],
+    passphrase: bytes = b"",
+    rework_groups: Sequence[Tuple[int, int]] = ((2, 3),),
+    new_identifier: int = None,
+) -> EraReworkResult:
+    """Simulate ERA wallet's SLIP39 rework (backup regeneration) path.
+
+    This models what happens when the ERA wallet regenerates SLIP39 shares
+    from stored account data.  The ERA code path is:
+
+    ``CryptoModule::createMnemonic`` → ``AccountsManager::generateMnemonicSLIP39``
+    → ``ShamirMnemonic::generateMnemonics(1, groups, entropy, "", id, false, ie)``
+
+    The entropy comes from ``AccountSecureData::entropy``, which was stored
+    during import by decrypting the EMS with an empty passphrase (Bug 1).
+
+    The identifier comes from ``CryptoModule::getAccountSlip39Identifier()``,
+    which reads ``AccountSecureData::slip39Id``.  However, if the active
+    account session is not available, it returns **0** — a different value.
+
+    **ERA has NO code to block this rework path for passphrase-protected shares.**
+    Specifically:
+
+    - ``generateMnemonicSLIP39`` (Account.cpp:102-127) takes entropy and
+      identifier as parameters and calls ``generateMnemonics`` with
+      ``extendable=false`` and an **empty passphrase** unconditionally.
+    - There is no check for whether the entropy was originally passphrase-protected.
+    - There is no warning or error when reworking passphrase-protected shares.
+    - The ``createMnemonic`` API (CryptoModule.cpp:396-410) simply forwards
+      parameters without validation.
+
+    :param mnemonics: Original SLIP39 mnemonic shares.
+    :param passphrase: The original passphrase used to create the shares.
+    :param rework_groups: The new group scheme for reworked shares.
+    :param new_identifier: If set, use this identifier for rework (simulates
+        the case where ``getAccountSlip39Identifier()`` returns a different
+        value, e.g. 0).  If None, use the original identifier.
+    :return: An :class:`EraReworkResult` with diagnostic info.
+    """
+    # Step 1: Import into ERA (to get the stored entropy).
+    import_result = simulate_era_import(mnemonics, passphrase)
+
+    rework_id = (
+        new_identifier if new_identifier is not None else import_result.identifier
+    )
+    ie = import_result.iteration_exponent
+
+    # Step 2: ERA calls generateMnemonicSLIP39(entropy, "", id, false, ie)
+    # This is Account.cpp line 113:
+    #   generateMnemonics(1, groups, entropy, "", identifier, false, iterationExponent)
+    reworked_ems_obj = EncryptedMasterSecret.from_master_secret(
+        import_result.stored_entropy,
+        b"",  # ERA always uses empty passphrase
+        rework_id,
+        False,  # ERA hardcodes extendable=False
+        ie,
+    )
+
+    grouped_shares = split_ems(1, list(rework_groups), reworked_ems_obj)
+    reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    # Step 3: What does a compliant tool get from these reworked shares?
+    threshold = rework_groups[0][0]
+    recovered_with_pp = combine_mnemonics(reworked_mnemonics[:threshold], passphrase)
+    recovered_without_pp = combine_mnemonics(reworked_mnemonics[:threshold])
+
+    correct_ms = import_result.correct_master_secret
+    recoverable = recovered_with_pp == correct_ms or recovered_without_pp == correct_ms
+
+    return EraReworkResult(
+        original_identifier=import_result.identifier,
+        rework_identifier=rework_id,
+        stored_entropy=import_result.stored_entropy,
+        reworked_ems=reworked_ems_obj.ciphertext,
+        reworked_shares=reworked_mnemonics,
+        recovered_with_passphrase=recovered_with_pp,
+        recovered_without_passphrase=recovered_without_pp,
+        original_secret_recoverable=recoverable,
+    )

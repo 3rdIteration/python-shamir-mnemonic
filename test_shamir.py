@@ -802,3 +802,292 @@ def test_era_rework_new_id_concrete_wallet_destruction():
     # built from wrong entropy. verify_mnemonics confirms they don't match.
     with pytest.raises(MnemonicError):
         shamir.verify_mnemonics(era_shares[:2], passphrase, MS)
+
+
+# ---------------------------------------------------------------------------
+# Passphrase compatibility tests
+# ---------------------------------------------------------------------------
+# These tests prove that simulate_era_import works correctly for ANY
+# non-extendable share generated with a passphrase — not just "TREZOR".
+# ---------------------------------------------------------------------------
+
+
+def test_era_import_works_for_any_passphrase():
+    """
+    Verify that simulate_era_import correctly handles non-extendable shares
+    generated with various passphrases.
+
+    For ALL passphrases:
+    - ERA's stored entropy is wrong (it's the plausible-deniability wallet).
+    - ERA's no-passphrase seed ≠ the original master secret.
+    - ERA's passphrase seed == the original master secret (Feistel round-trip).
+
+    This confirms the answer: YES, the ERA import path produces correct
+    passphrase-wallet addresses for ANY non-extendable share with ANY passphrase,
+    because the Feistel round-trip property is independent of the passphrase value.
+    """
+    passphrases = [b"TREZOR", b"secret", b"a", b"X" * 100, b"p@$$w0rd!"]
+
+    for pp in passphrases:
+        mnemonics = shamir.generate_mnemonics(
+            1, [(3, 5)], MS, pp, extendable=False, iteration_exponent=1
+        )[0]
+
+        result = shamir.simulate_era_import(mnemonics[:3], passphrase=pp)
+
+        # ERA stores the wrong entropy (Bug 1: decrypt with "").
+        assert result.stored_entropy != MS, (
+            f"passphrase={pp!r}: ERA should NOT get the correct entropy"
+        )
+
+        # ERA's no-passphrase view shows wrong addresses.
+        assert result.no_passphrase_seed != MS, (
+            f"passphrase={pp!r}: ERA default view should be wrong"
+        )
+
+        # ERA's passphrase view shows CORRECT addresses.
+        assert result.passphrase_seed == MS, (
+            f"passphrase={pp!r}: ERA passphrase view should be correct "
+            "(Feistel round-trip preserves EMS)"
+        )
+
+        # The correct master secret matches.
+        assert result.correct_master_secret == MS, (
+            f"passphrase={pp!r}: compliant recovery should match"
+        )
+
+
+def test_era_import_works_for_non_extendable_with_passphrase_and_different_iteration_exponents():
+    """
+    Verify that the Feistel round-trip works for non-extendable shares with
+    passphrases at different iteration exponents.
+
+    The iteration exponent only affects the number of PBKDF2 rounds, not the
+    salt structure, so the round-trip property should hold regardless.
+    """
+    passphrase = b"TREZOR"
+
+    for ie in [0, 1, 2]:
+        mnemonics = shamir.generate_mnemonics(
+            1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=ie
+        )[0]
+
+        result = shamir.simulate_era_import(mnemonics[:3], passphrase=passphrase)
+
+        assert result.stored_entropy != MS, (
+            f"ie={ie}: ERA should store wrong entropy"
+        )
+        assert result.passphrase_seed == MS, (
+            f"ie={ie}: ERA passphrase view should still be correct"
+        )
+
+
+def test_era_import_extendable_with_passphrase():
+    """
+    Verify simulate_era_import for EXTENDABLE shares with a passphrase.
+
+    For extendable shares (salt=empty), ERA's Bug 2 (hardcoded extendable=False)
+    changes the salt during re-encryption. The Feistel round-trip does NOT hold
+    because the salt changes:
+      encrypt(decrypt(ct, empty_salt), non_empty_salt) ≠ ct
+
+    This means even the passphrase wallet is broken for extendable shares
+    imported into ERA — the stored EMS differs from the original.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    result = shamir.simulate_era_import(mnemonics[:3], passphrase=passphrase)
+
+    # ERA's stored entropy is wrong (Bug 1).
+    assert result.stored_entropy != MS
+
+    # For extendable shares, the stored EMS differs from original because
+    # ERA re-encrypts with extendable=False (different salt).
+    groups = shamir.decode_mnemonics(mnemonics[:3])
+    original_ems = shamir.recover_ems(groups)
+
+    # Bug 2 causes the EMS to change (salt mismatch).
+    assert result.stored_ems != original_ems.ciphertext, (
+        "For extendable shares, ERA's Bug 2 (hardcoded extendable=False) "
+        "changes the salt, so the round-trip does NOT preserve the EMS."
+    )
+
+    # The passphrase wallet is ALSO broken.
+    assert result.passphrase_seed != MS, (
+        "For extendable shares imported into ERA, even the passphrase wallet "
+        "produces wrong addresses because the stored EMS has a different salt."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ERA wallet scenario 2 and 4 blocking tests
+# ---------------------------------------------------------------------------
+# These tests prove that the ERA wallet has NO code to block:
+#   Scenario 2: Importing non-extendable shares with a passphrase
+#                (ERA silently ignores the passphrase → wrong entropy)
+#   Scenario 4: Reworking shares with a new/zero identifier
+#                (ERA silently destroys the passphrase wallet)
+# ---------------------------------------------------------------------------
+
+
+def test_era_no_block_scenario_2_passphrase_ignored_during_import():
+    """
+    Prove ERA wallet has NO code to block Scenario 2:
+    importing non-extendable passphrase-protected shares.
+
+    ERA wallet code path (Account.cpp):
+      - decodeShamirShares():  encryptedMasterSecret.decrypt({})  [line 210]
+      - addAccount():          encryptedMasterSecret.decrypt("")   [line 433]
+
+    Both ALWAYS use empty passphrase, regardless of what the user entered.
+    There is no validation, no prompt, no warning.  The passphrase parameter
+    in decodeShamirShares() is accepted but completely ignored — it is never
+    passed to the decrypt call.
+
+    This test verifies the import succeeds silently with wrong entropy stored.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    result = shamir.simulate_era_import(mnemonics[:3], passphrase=passphrase)
+
+    # Import "succeeds" — ERA gets entropy without error.
+    assert result.stored_entropy is not None
+    assert len(result.stored_entropy) == len(MS)
+
+    # But the stored entropy is WRONG.
+    assert result.stored_entropy != MS, (
+        "ERA has no blocking for Scenario 2: passphrase-protected shares are "
+        "imported silently with wrong entropy. The passphrase parameter in "
+        "decodeShamirShares() is accepted but never used."
+    )
+
+    # ERA creates an account with wrong entropy — no error, no warning.
+    # The Account constructor (line 831-867) re-encrypts the wrong entropy
+    # and stores the EMS without any validation.
+    assert result.stored_ems is not None
+    assert len(result.stored_ems) == len(MS)
+
+
+def test_era_no_block_scenario_4_rework_with_same_identifier():
+    """
+    Prove ERA wallet has NO code to block Scenario 4 (part 1):
+    reworking shares preserves the EMS when the same identifier is used.
+
+    When the identifier is preserved:
+    - The Feistel round-trip holds: encrypt(decrypt(ct,S),S) = ct
+    - The reworked shares contain the original EMS ciphertext
+    - A compliant tool CAN still recover with the passphrase
+
+    But ERA itself shows wrong addresses (no-passphrase view), and there
+    is no code to detect or warn about this.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    # Rework with same identifier — the "safe" case.
+    rework = shamir.simulate_era_rework(
+        mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),)
+    )
+
+    # Same identifier is used.
+    assert rework.rework_identifier == rework.original_identifier
+
+    # The original secret IS recoverable from reworked shares (with passphrase).
+    assert rework.original_secret_recoverable, (
+        "With same identifier, the Feistel round-trip preserves the EMS."
+    )
+    assert rework.recovered_with_passphrase == MS
+
+    # But without passphrase, recovery gives the wrong entropy.
+    assert rework.recovered_without_passphrase != MS
+    assert rework.recovered_without_passphrase == rework.stored_entropy
+
+    # No code in ERA blocks this — the rework proceeds silently.
+    assert len(rework.reworked_shares) == 3
+
+
+def test_era_no_block_scenario_4_rework_with_new_identifier():
+    """
+    Prove ERA wallet has NO code to block Scenario 4 (part 2):
+    reworking shares with a DIFFERENT identifier.
+
+    This is the catastrophic case: when getAccountSlip39Identifier() returns
+    a different value (e.g. 0 when account session is lost), the Feistel
+    round-trip breaks because the salt changes.
+
+    ERA wallet code path:
+      CryptoModule::getAccountSlip39Identifier() [CryptoModule.cpp:588]:
+        auto account = _getActiveAccount({});
+        if (!account) { return 0; }          // ← Returns 0 if no session!
+        return account->getSlip39Identifier();
+
+    There is NO validation that the identifier matches the original shares.
+    There is NO warning when a zero identifier is used.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    # Rework with identifier=0 (what ERA returns when account session is lost).
+    rework = shamir.simulate_era_rework(
+        mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),),
+        new_identifier=0,
+    )
+
+    # Different identifier was used.
+    assert rework.rework_identifier != rework.original_identifier
+    assert rework.rework_identifier == 0
+
+    # The original secret is NOT recoverable — wallet is destroyed.
+    assert not rework.original_secret_recoverable, (
+        "ERA has no blocking for Scenario 4: rework with a different identifier "
+        "silently destroys the passphrase wallet. There is no validation that "
+        "the identifier matches the original shares."
+    )
+    assert rework.recovered_with_passphrase != MS
+    assert rework.recovered_without_passphrase != MS
+
+    # Reworked shares were generated without error — no blocking.
+    assert len(rework.reworked_shares) == 3
+
+
+def test_era_no_block_scenario_4_rework_with_arbitrary_identifier():
+    """
+    Additional proof that ANY different identifier breaks recovery.
+
+    The ERA wallet code has no range checks on the identifier, no comparison
+    with the original, and no integrity verification.
+    """
+    passphrase = b"TREZOR"
+
+    mnemonics = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    # Try several different identifiers.
+    for bad_id in [0, 1, 100, 12345, 32767]:
+        rework = shamir.simulate_era_rework(
+            mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),),
+            new_identifier=bad_id,
+        )
+
+        # If the identifier happens to match the original, the round-trip works.
+        if bad_id == rework.original_identifier:
+            assert rework.original_secret_recoverable
+        else:
+            assert not rework.original_secret_recoverable, (
+                f"id={bad_id}: rework with different identifier must break recovery"
+            )

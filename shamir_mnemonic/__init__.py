@@ -4,11 +4,13 @@ from .cipher import decrypt, encrypt
 from .shamir import (
     EncryptedMasterSecret,
     EraImportResult,
+    EraReworkResult,
     combine_mnemonics,
     decode_mnemonics,
     generate_mnemonics,
     recover_ems,
     simulate_era_import,
+    simulate_era_rework,
     split_ems,
     verify_mnemonics,
 )
@@ -25,8 +27,10 @@ __all__ = [
     "recover_ems",
     "verify_mnemonics",
     "simulate_era_import",
+    "simulate_era_rework",
     "EncryptedMasterSecret",
     "EraImportResult",
+    "EraReworkResult",
     "MnemonicError",
     "Share",
 ]
