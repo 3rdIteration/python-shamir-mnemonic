@@ -5,9 +5,11 @@ from random import shuffle
 
 import pytest
 from bip32utils import BIP32Key
+from click.testing import CliRunner
 
 import shamir_mnemonic as shamir
 from shamir_mnemonic import MnemonicError
+from shamir_mnemonic.cli import cli
 
 MS = b"ABCDEFGHIJKLMNOP"
 
@@ -181,3 +183,45 @@ def test_recover_ems():
     encrypted_master_secret = shamir.recover_ems(groups)
     recovered = encrypted_master_secret.decrypt(b"TREZOR")
     assert recovered == MS
+
+
+def test_decode_cli():
+    """Test the decode CLI command with generated shares."""
+    mnemonics = shamir.generate_mnemonics(1, [(2, 3)], MS)[0]
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", mnemonics[0], mnemonics[1]])
+    assert result.exit_code == 0
+    assert "Share #1:" in result.output
+    assert "Share #2:" in result.output
+    assert "Identifier:" in result.output
+    assert "Extendable:" in result.output
+    assert "Iteration exponent:" in result.output
+    assert "Group index:" in result.output
+    assert "Group threshold:" in result.output
+    assert "Group count:" in result.output
+    assert "Member index:" in result.output
+    assert "Member threshold:" in result.output
+    assert "Share value:" in result.output
+    assert "All shares belong to the same set." in result.output
+
+
+def test_decode_cli_single_share():
+    """Test the decode CLI command with a single share."""
+    mnemonics = shamir.generate_mnemonics(1, [(2, 3)], MS)[0]
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", mnemonics[0]])
+    assert result.exit_code == 0
+    assert "Share #1:" in result.output
+    # Single share should not show set membership info
+    assert "All shares belong to the same set." not in result.output
+
+
+def test_decode_cli_invalid_mnemonic():
+    """Test the decode CLI command with an invalid mnemonic."""
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["decode", "invalid mnemonic words that should fail"])
+    assert result.exit_code == 0
+    assert "ERROR" in result.output

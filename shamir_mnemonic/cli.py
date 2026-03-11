@@ -12,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import generate_mnemonics
+from .shamir import decode_mnemonics, generate_mnemonics
 from .share import Share
 from .utils import MnemonicError
 
@@ -152,6 +152,89 @@ def create(
         click.echo(f"{group_str} - {share_str}")
         for g in group:
             click.echo(g)
+
+
+@cli.command()
+@click.argument("mnemonics", nargs=-1, required=True)
+def decode(mnemonics: Sequence[str]) -> None:
+    """Decode one or more SLIP-39 share mnemonics and display their internal data.
+
+    Each MNEMONIC is a space-separated sequence of words enclosed in quotes.
+
+    Example usage:
+
+    \b
+    shamir decode "word1 word2 word3 ..." "word1 word2 word3 ..."
+    """
+    shares = []
+    for i, mnemonic in enumerate(mnemonics, 1):
+        click.echo(style(f"Share #{i}:", bold=True))
+        try:
+            share = Share.from_mnemonic(mnemonic)
+        except MnemonicError as e:
+            click.echo(style(f"  ERROR: {e}", fg="red"))
+            click.echo()
+            continue
+
+        shares.append(share)
+
+        click.echo(f"  {style('Mnemonic:', fg='cyan')} {mnemonic}")
+        click.echo(f"  {style('Identifier:', fg='cyan')} {share.identifier}")
+        click.echo(f"  {style('Extendable:', fg='cyan')} {share.extendable}")
+        click.echo(
+            f"  {style('Iteration exponent:', fg='cyan')} {share.iteration_exponent}"
+        )
+        click.echo(f"  {style('Group index:', fg='cyan')} {share.group_index}")
+        click.echo(f"  {style('Group threshold:', fg='cyan')} {share.group_threshold}")
+        click.echo(f"  {style('Group count:', fg='cyan')} {share.group_count}")
+        click.echo(f"  {style('Member index:', fg='cyan')} {share.index}")
+        click.echo(
+            f"  {style('Member threshold:', fg='cyan')} {share.member_threshold}"
+        )
+        click.echo(f"  {style('Share value:', fg='cyan')} {share.value.hex()}")
+        click.echo()
+
+    if len(shares) < 2:
+        return
+
+    # Check if shares belong to the same set
+    common_params = set(s.common_parameters() for s in shares)
+    if len(common_params) == 1:
+        click.echo(style("All shares belong to the same set.", fg="green"))
+    else:
+        click.echo(
+            style(
+                "WARNING: Shares do not all belong to the same set.",
+                fg="yellow",
+                bold=True,
+            )
+        )
+
+    # Try to decode/group shares
+    try:
+        groups = decode_mnemonics(m for m in mnemonics if _try_parse(m))
+        for group_index, group in sorted(groups.items()):
+            gp = group.group_parameters()
+            complete = group.is_complete()
+            status = (
+                style("COMPLETE", fg="green", bold=True)
+                if complete
+                else style("INCOMPLETE", fg="yellow")
+            )
+            click.echo(
+                f"  Group {group_index}: "
+                f"{len(group)}/{gp.member_threshold} shares ({status})"
+            )
+    except MnemonicError:
+        pass
+
+
+def _try_parse(mnemonic: str) -> bool:
+    try:
+        Share.from_mnemonic(mnemonic)
+        return True
+    except MnemonicError:
+        return False
 
 
 FINISHED = style("\u2713", fg="green", bold=True)
