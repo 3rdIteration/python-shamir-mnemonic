@@ -312,3 +312,156 @@ def test_resplit_non_extendable_different_group_structure():
     assert MS == shamir.combine_mnemonics(
         new_shares[1][:3] + new_shares[2][:1], b"TREZOR"
     )
+
+
+def test_rework_non_extendable_to_extendable():
+    """Non-extendable shares can be reworked to extendable given the passphrase.
+
+    This demonstrates that the non-extendable flag is a software convention, not
+    a cryptographic guarantee: with the passphrase, shares can be converted.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Rework to extendable with a new group configuration.
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares recover the same master secret.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+    # Verify that the new shares are actually marked extendable:
+    # Two independently reworked sets should give consistent wrong-passphrase results,
+    # since extendable shares use empty salt.
+    reworked2 = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+    wrong_pw1 = shamir.combine_mnemonics(reworked[0][:2])
+    wrong_pw2 = shamir.combine_mnemonics(reworked2[0][:2])
+    assert wrong_pw1 == wrong_pw2  # Extendable: consistent for any passphrase
+
+
+def test_rework_extendable_to_non_extendable():
+    """Extendable shares can be reworked to non-extendable given the passphrase."""
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[0]
+
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=False, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares recover the same master secret.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+
+def test_rework_preserves_iteration_exponent():
+    """rework_mnemonics preserves the original iteration exponent by default."""
+    original = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False, iteration_exponent=2
+    )[0]
+
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # Recover and verify: the iteration exponent is preserved.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+    # Verify the iteration exponent is preserved by checking the EMS.
+    groups = shamir.decode_mnemonics(reworked[0][:2])
+    ems = shamir.recover_ems(groups)
+    assert ems.iteration_exponent == 2
+
+
+def test_rework_with_wrong_passphrase():
+    """Reworking with a wrong passphrase produces shares that don't recover the
+    original secret (but don't raise an error either — the Feistel cipher has no
+    authentication).
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Rework with wrong passphrase.
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"WRONG", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares do NOT recover the original master secret with any passphrase.
+    assert MS != shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+    assert MS != shamir.combine_mnemonics(reworked[0][:2], b"WRONG")
+    assert MS != shamir.combine_mnemonics(reworked[0][:2])
+
+
+def test_verify_correct_shares():
+    """verify_mnemonics returns True for correctly generated shares."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+
+
+def test_verify_correct_extendable_shares():
+    """verify_mnemonics returns True for correctly generated extendable shares."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+
+
+def test_verify_wrong_passphrase():
+    """verify_mnemonics returns False when the passphrase is wrong."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"WRONG", MS) is False
+
+
+def test_verify_detects_wrong_salt_mode():
+    """verify_mnemonics can detect shares encrypted with the wrong salt mode.
+
+    This simulates a buggy implementation that marks shares as non-extendable but
+    uses empty salt (the extendable mode) for encryption.
+    """
+    identifier = 12345
+    iteration_exponent = 1
+
+    # Encrypt with EXTENDABLE (empty) salt...
+    ems_buggy = shamir.EncryptedMasterSecret.from_master_secret(
+        MS,
+        b"TREZOR",
+        identifier,
+        extendable=True,
+        iteration_exponent=iteration_exponent,
+    )
+
+    # ...but create shares marked as NON-EXTENDABLE (wrong flag).
+    from shamir_mnemonic.share import Share
+
+    buggy_shares = shamir.split_ems(
+        1,
+        [(3, 5)],
+        shamir.EncryptedMasterSecret(
+            identifier, False, iteration_exponent, ems_buggy.ciphertext
+        ),
+    )
+    buggy_mnemonics = [share.mnemonic() for share in buggy_shares[0]]
+
+    # verify_mnemonics detects the mismatch: the shares say non-extendable,
+    # but the ciphertext was encrypted with extendable (empty) salt.
+    assert shamir.verify_mnemonics(buggy_mnemonics[:3], b"TREZOR", MS) is False
+
+    # However, if we decrypt treating the shares as extendable (ignoring the flag),
+    # we get the correct master secret.
+    groups = shamir.decode_mnemonics(buggy_mnemonics[:3])
+    ems = shamir.recover_ems(groups)
+
+    # Decrypt with extendable=True (the actual salt mode used).
+    ems_fixed = shamir.EncryptedMasterSecret(
+        ems.identifier, True, ems.iteration_exponent, ems.ciphertext
+    )
+    assert ems_fixed.decrypt(b"TREZOR") == MS
+
+    # Decrypt with extendable=False (what the flag says) gives wrong result.
+    assert ems.decrypt(b"TREZOR") != MS

@@ -22,7 +22,18 @@
 import hmac
 import secrets
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from . import cipher
 from .constants import (
@@ -506,6 +517,101 @@ def resplit_mnemonics(
     encrypted_master_secret = recover_ems(decoded_groups)
     grouped_shares = split_ems(group_threshold, groups, encrypted_master_secret)
     return [[share.mnemonic() for share in group] for group in grouped_shares]
+
+
+def rework_mnemonics(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    extendable: bool,
+    group_threshold: int,
+    groups: Sequence[Tuple[int, int]],
+    iteration_exponent: Optional[int] = None,
+) -> List[List[str]]:
+    """
+    Recover the master secret from existing shares, then re-encrypt and re-split
+    with a potentially different extendable flag and group configuration.
+
+    This function demonstrates that the non-extendable flag is a software-level
+    convention, not a cryptographic guarantee: given the passphrase, any set of
+    shares can be converted between extendable and non-extendable modes.
+
+    Unlike ``resplit_mnemonics`` (which preserves the identifier and encrypted master
+    secret without needing the passphrase), this function fully decrypts and
+    re-encrypts the master secret, allowing the extendable flag — and thus the
+    encryption salt mode — to be changed.
+
+    .. note::
+        A new random identifier is generated for the output shares. The old and new
+        share sets cannot be mixed together for recovery.
+
+    :param mnemonics: List of mnemonics (enough to meet the original threshold).
+    :param passphrase: The passphrase used to encrypt the master secret.
+    :param extendable: The extendable flag for the new shares. Set to ``True`` to
+        convert non-extendable shares to extendable, or ``False`` for the reverse.
+    :param group_threshold: The number of groups required to reconstruct the master secret.
+    :param groups: A list of (member_threshold, member_count) pairs for each group.
+    :param iteration_exponent: The iteration exponent for the new shares. If ``None``,
+        the original value is preserved.
+    :return: List of groups of mnemonics.
+    """
+    if not mnemonics:
+        raise MnemonicError("The list of mnemonics is empty.")
+
+    decoded_groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(decoded_groups)
+    master_secret = ems.decrypt(passphrase)
+
+    if iteration_exponent is None:
+        iteration_exponent = ems.iteration_exponent
+
+    return generate_mnemonics(
+        group_threshold,
+        groups,
+        master_secret,
+        passphrase,
+        extendable,
+        iteration_exponent,
+    )
+
+
+def verify_mnemonics(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    master_secret: bytes,
+) -> bool:
+    """
+    Verify that the given shares correctly encrypt the expected master secret
+    using the salt mode indicated by their extendable flag.
+
+    This can detect buggy implementations that use the wrong salt mode — for
+    example, a device that marks shares as non-extendable but encrypts with an
+    empty salt (the extendable mode).
+
+    The function recovers the Encrypted Master Secret from the shares, then
+    re-encrypts the expected ``master_secret`` with the same identifier,
+    extendable flag, and iteration exponent. If the resulting ciphertext matches,
+    the shares are consistent with their declared parameters.
+
+    :param mnemonics: List of mnemonics (enough to meet the original threshold).
+    :param passphrase: The passphrase used to encrypt the master secret.
+    :param master_secret: The expected master secret to verify against.
+    :return: ``True`` if the shares' ciphertext matches the expected encryption
+        using the declared salt mode, ``False`` otherwise.
+    """
+    if not mnemonics:
+        raise MnemonicError("The list of mnemonics is empty.")
+
+    decoded_groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(decoded_groups)
+
+    expected_ems = EncryptedMasterSecret.from_master_secret(
+        master_secret,
+        passphrase,
+        ems.identifier,
+        ems.extendable,
+        ems.iteration_exponent,
+    )
+    return expected_ems.ciphertext == ems.ciphertext
 
 
 def combine_mnemonics(mnemonics: Iterable[str], passphrase: bytes = b"") -> bytes:
