@@ -509,7 +509,7 @@ def verify_mnemonics(
     decrypted = ems.decrypt(passphrase)
 
     if decrypted == expected_master_secret:
-        return None
+        return
 
     # The declared parameters did not produce the expected master secret.
     # Try decrypting with the opposite extendable flag to diagnose a

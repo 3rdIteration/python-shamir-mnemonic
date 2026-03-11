@@ -719,7 +719,7 @@ def test_era_import_concrete_bip32_key_divergence():
     era_default_xprv = BIP32Key.fromEntropy(result.no_passphrase_seed).ExtendedKey()
     era_passphrase_xprv = BIP32Key.fromEntropy(result.passphrase_seed).ExtendedKey()
 
-    # ERA's default view shows the wrong root key.
+    # ERA's default view shows a different root key than what the user expects.
     assert era_default_xprv != correct_xprv, (
         "ERA default view: wrong BIP32 root key → wrong addresses"
     )
@@ -729,10 +729,12 @@ def test_era_import_concrete_bip32_key_divergence():
         "ERA passphrase view: correct BIP32 root key → correct addresses"
     )
 
-    # All three are truly different values (not just a trivial equality).
-    assert len({correct_xprv, era_default_xprv, era_passphrase_xprv}) == 2, (
-        "Exactly two distinct xprv values: the correct one (shared by "
-        "ERA+passphrase and compliant tool) and ERA's wrong default."
+    # Summary: two distinct xprv values from three derivation paths.
+    # correct_xprv == era_passphrase_xprv (user's real wallet)
+    # era_default_xprv is a different wallet entirely (plausible-deniability wallet).
+    assert era_default_xprv != era_passphrase_xprv, (
+        "ERA shows two distinct wallets: the wrong default one and the "
+        "correct passphrase-protected one."
     )
 
 
