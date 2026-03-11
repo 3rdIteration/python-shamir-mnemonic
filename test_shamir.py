@@ -39,6 +39,65 @@ def test_non_extendable():
     assert MS == shamir.combine_mnemonics(mnemonics[1:4])
 
 
+def test_non_extendable_regeneration_passphrase_inconsistency():
+    """Non-extendable shares: regenerating shares for the same master secret produces
+    different results when combined with a wrong passphrase, because the random
+    identifier is included in the encryption salt.
+
+    With the correct passphrase, both sets recover the original master secret.
+    With a wrong passphrase, each set produces a different (incorrect) secret.
+    """
+    mnemonics1 = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False
+    )[0]
+    mnemonics2 = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False
+    )[0]
+
+    # Correct passphrase: both sets recover the same master secret.
+    assert MS == shamir.combine_mnemonics(mnemonics1[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(mnemonics2[:3], b"TREZOR")
+
+    # Wrong (empty) passphrase: each set produces a different incorrect secret,
+    # because the identifier differs between the two generations and is part of
+    # the encryption salt for non-extendable shares.
+    wrong_pw_result1 = shamir.combine_mnemonics(mnemonics1[:3])
+    wrong_pw_result2 = shamir.combine_mnemonics(mnemonics2[:3])
+    assert wrong_pw_result1 != MS
+    assert wrong_pw_result2 != MS
+    assert wrong_pw_result1 != wrong_pw_result2
+
+
+def test_extendable_regeneration_passphrase_consistency():
+    """Extendable shares: regenerating shares for the same master secret produces
+    the same results even when combined with a wrong passphrase, because the
+    encryption salt does not include the identifier.
+
+    This is the key advantage of extendable (reworkable) shares over non-extendable
+    (non-reworkable) ones: the derived secret is always consistent regardless of which
+    set of shares is used, for any passphrase.
+    """
+    mnemonics1 = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+    mnemonics2 = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+
+    # Correct passphrase: both sets recover the same master secret.
+    assert MS == shamir.combine_mnemonics(mnemonics1[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(mnemonics2[:3], b"TREZOR")
+
+    # Wrong (empty) passphrase: both sets produce the same (incorrect) secret,
+    # because the encryption salt is empty for extendable shares and does not
+    # depend on the identifier.
+    wrong_pw_result1 = shamir.combine_mnemonics(mnemonics1[:3])
+    wrong_pw_result2 = shamir.combine_mnemonics(mnemonics2[:3])
+    assert wrong_pw_result1 != MS
+    assert wrong_pw_result2 != MS
+    assert wrong_pw_result1 == wrong_pw_result2
+
+
 def test_iteration_exponent():
     mnemonics = shamir.generate_mnemonics(
         1, [(3, 5)], MS, b"TREZOR", iteration_exponent=1
@@ -181,3 +240,327 @@ def test_recover_ems():
     encrypted_master_secret = shamir.recover_ems(groups)
     recovered = encrypted_master_secret.decrypt(b"TREZOR")
     assert recovered == MS
+
+
+def test_resplit_non_extendable():
+    """Non-extendable shares can be safely re-split when the identifier is preserved.
+
+    Because resplit_mnemonics recovers the EMS (which includes the original identifier)
+    and re-splits it, the encryption salt stays the same, and the new shares decrypt to
+    the same master secret with any passphrase.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-split into a different group configuration.
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+
+    # New shares recover the same master secret with the correct passphrase.
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+
+def test_resplit_extendable():
+    """Extendable shares can also be re-split."""
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[0]
+
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+
+def test_resplit_non_extendable_wrong_passphrase_consistency():
+    """After re-splitting non-extendable shares (preserving identifier), the new shares
+    produce the same result as the original shares for any passphrase, including a wrong
+    one. This is because the identifier (and therefore the encryption salt) is preserved.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    new_shares = shamir.resplit_mnemonics(original[:3], 1, [(2, 3)])
+
+    # Correct passphrase: both yield the original master secret.
+    assert MS == shamir.combine_mnemonics(original[:3], b"TREZOR")
+    assert MS == shamir.combine_mnemonics(new_shares[0][:2], b"TREZOR")
+
+    # Wrong (empty) passphrase: both yield the same (incorrect) secret,
+    # because the identifier and salt are preserved.
+    wrong_pw_original = shamir.combine_mnemonics(original[:3])
+    wrong_pw_new = shamir.combine_mnemonics(new_shares[0][:2])
+    assert wrong_pw_original != MS
+    assert wrong_pw_new != MS
+    assert wrong_pw_original == wrong_pw_new
+
+
+def test_resplit_non_extendable_different_group_structure():
+    """Re-splitting non-extendable shares into a more complex group structure works
+    correctly and preserves decryption consistency.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-split into 2-of-3 groups with different member thresholds.
+    new_shares = shamir.resplit_mnemonics(original[:3], 2, [(2, 3), (3, 5), (1, 1)])
+
+    # Recover using group 0 + group 2.
+    assert MS == shamir.combine_mnemonics(
+        new_shares[0][:2] + new_shares[2][:1], b"TREZOR"
+    )
+
+    # Recover using group 1 + group 2.
+    assert MS == shamir.combine_mnemonics(
+        new_shares[1][:3] + new_shares[2][:1], b"TREZOR"
+    )
+
+
+def test_rework_non_extendable_to_extendable():
+    """Non-extendable shares can be reworked to extendable given the passphrase.
+
+    This demonstrates that the non-extendable flag is a software convention, not
+    a cryptographic guarantee: with the passphrase, shares can be converted.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Rework to extendable with a new group configuration.
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares recover the same master secret.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+    # Verify that the new shares are actually marked extendable:
+    # Two independently reworked sets should give consistent wrong-passphrase results,
+    # since extendable shares use empty salt.
+    reworked2 = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+    wrong_pw1 = shamir.combine_mnemonics(reworked[0][:2])
+    wrong_pw2 = shamir.combine_mnemonics(reworked2[0][:2])
+    assert wrong_pw1 == wrong_pw2  # Extendable: consistent for any passphrase
+
+
+def test_rework_extendable_to_non_extendable():
+    """Extendable shares can be reworked to non-extendable given the passphrase."""
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[0]
+
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=False, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares recover the same master secret.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+
+def test_rework_preserves_iteration_exponent():
+    """rework_mnemonics preserves the original iteration exponent by default."""
+    original = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, b"TREZOR", extendable=False, iteration_exponent=2
+    )[0]
+
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # Recover and verify: the iteration exponent is preserved.
+    assert MS == shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+
+    # Verify the iteration exponent is preserved by checking the EMS.
+    groups = shamir.decode_mnemonics(reworked[0][:2])
+    ems = shamir.recover_ems(groups)
+    assert ems.iteration_exponent == 2
+
+
+def test_rework_with_wrong_passphrase():
+    """Reworking with a wrong passphrase produces shares that don't recover the
+    original secret (but don't raise an error either — the Feistel cipher has no
+    authentication).
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Rework with wrong passphrase.
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"WRONG", extendable=True, group_threshold=1, groups=[(2, 3)]
+    )
+
+    # The reworked shares do NOT recover the original master secret with any passphrase.
+    assert MS != shamir.combine_mnemonics(reworked[0][:2], b"TREZOR")
+    assert MS != shamir.combine_mnemonics(reworked[0][:2], b"WRONG")
+    assert MS != shamir.combine_mnemonics(reworked[0][:2])
+
+
+def test_verify_correct_shares():
+    """verify_mnemonics returns True for correctly generated shares."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+
+
+def test_verify_correct_extendable_shares():
+    """verify_mnemonics returns True for correctly generated extendable shares."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=True)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"TREZOR", MS) is True
+
+
+def test_verify_wrong_passphrase():
+    """verify_mnemonics returns False when the passphrase is wrong."""
+    mnemonics = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+    assert shamir.verify_mnemonics(mnemonics[:3], b"WRONG", MS) is False
+
+
+def test_verify_detects_wrong_salt_mode():
+    """verify_mnemonics can detect shares encrypted with the wrong salt mode.
+
+    This simulates a buggy implementation that marks shares as non-extendable but
+    uses empty salt (the extendable mode) for encryption.
+    """
+    identifier = 12345
+    iteration_exponent = 1
+
+    # Encrypt with EXTENDABLE (empty) salt...
+    ems_buggy = shamir.EncryptedMasterSecret.from_master_secret(
+        MS,
+        b"TREZOR",
+        identifier,
+        extendable=True,
+        iteration_exponent=iteration_exponent,
+    )
+
+    # ...but create shares marked as NON-EXTENDABLE (wrong flag).
+    buggy_shares = shamir.split_ems(
+        1,
+        [(3, 5)],
+        shamir.EncryptedMasterSecret(
+            identifier, False, iteration_exponent, ems_buggy.ciphertext
+        ),
+    )
+    buggy_mnemonics = [share.mnemonic() for share in buggy_shares[0]]
+
+    # verify_mnemonics detects the mismatch: the shares say non-extendable,
+    # but the ciphertext was encrypted with extendable (empty) salt.
+    assert shamir.verify_mnemonics(buggy_mnemonics[:3], b"TREZOR", MS) is False
+
+    # However, if we decrypt treating the shares as extendable (ignoring the flag),
+    # we get the correct master secret.
+    groups = shamir.decode_mnemonics(buggy_mnemonics[:3])
+    ems = shamir.recover_ems(groups)
+
+    # Decrypt with extendable=True (the actual salt mode used).
+    ems_fixed = shamir.EncryptedMasterSecret(
+        ems.identifier, True, ems.iteration_exponent, ems.ciphertext
+    )
+    assert ems_fixed.decrypt(b"TREZOR") == MS
+
+    # Decrypt with extendable=False (what the flag says) gives wrong result.
+    assert ems.decrypt(b"TREZOR") != MS
+
+
+def test_reencode_shares_checksum_is_trivial():
+    """Re-encoding shares with a different extendable flag is trivial and
+    deterministic — no brute-forcing of words is needed.
+
+    The RS1024 checksum is simply recomputed with the new customization string.
+    The result is a valid mnemonic that can be parsed without errors.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-encode as extendable. This is a simple, deterministic operation.
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+
+    # Each re-encoded share is a valid mnemonic (passes checksum verification).
+    for mnemonic in reencoded:
+        share = shamir.Share.from_mnemonic(mnemonic)
+        assert share.extendable is True
+
+    # The original shares are non-extendable.
+    for mnemonic in original[:3]:
+        share = shamir.Share.from_mnemonic(mnemonic)
+        assert share.extendable is False
+
+
+def test_reencode_shares_breaks_passphrase_recovery():
+    """Re-encoding shares (fixing checksums) is NOT sufficient for passphrase
+    consistency. The "extra step" is not brute-forcing checksums — it's
+    re-encrypting the data with the correct salt, which requires the passphrase.
+
+    Re-encoded shares parse correctly but decrypt to the wrong master secret,
+    because the ciphertext was encrypted with the non-extendable salt (which
+    includes the identifier) but the re-encoded shares now claim to be extendable
+    (empty salt).
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Re-encode as extendable (just flips flag + fixes checksum).
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+
+    # The re-encoded shares are parseable and combine without error...
+    result = shamir.combine_mnemonics(reencoded, b"TREZOR")
+
+    # ...but the result is WRONG because the ciphertext inside was encrypted
+    # with non-extendable salt (identifier-based), while combine_mnemonics
+    # now decrypts with extendable salt (empty).
+    assert result != MS
+
+
+def test_reencode_vs_rework_passphrase_consistency():
+    """Contrast reencode_shares (insufficient) with rework_mnemonics (correct).
+
+    reencode_shares just flips the flag and fixes the checksum. This is trivial
+    but breaks passphrase recovery.
+
+    rework_mnemonics decrypts with the old salt and re-encrypts with the new salt.
+    This requires the passphrase but correctly maintains passphrase consistency.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    # Approach 1: Just flip the flag (wrong — breaks recovery).
+    reencoded = shamir.reencode_shares(original[:3], extendable=True)
+    assert shamir.combine_mnemonics(reencoded, b"TREZOR") != MS
+
+    # Approach 2: Full rework with passphrase (correct — preserves recovery).
+    reworked = shamir.rework_mnemonics(
+        original[:3], b"TREZOR", extendable=True, group_threshold=1, groups=[(3, 5)]
+    )
+    assert shamir.combine_mnemonics(reworked[0][:3], b"TREZOR") == MS
+
+
+def test_reencode_shares_preserves_share_data():
+    """Re-encoding preserves the underlying share value bytes. Only the flag
+    and checksum change.
+    """
+    original = shamir.generate_mnemonics(1, [(3, 5)], MS, b"TREZOR", extendable=False)[
+        0
+    ]
+
+    reencoded = shamir.reencode_shares(original, extendable=True)
+
+    for orig_mnemonic, new_mnemonic in zip(original, reencoded):
+        orig_share = shamir.Share.from_mnemonic(orig_mnemonic)
+        new_share = shamir.Share.from_mnemonic(new_mnemonic)
+
+        # The value bytes are identical.
+        assert orig_share.value == new_share.value
+        # The identifier and other metadata are identical.
+        assert orig_share.identifier == new_share.identifier
+        assert orig_share.iteration_exponent == new_share.iteration_exponent
+        assert orig_share.group_index == new_share.group_index
+        assert orig_share.index == new_share.index
+        # Only the extendable flag differs.
+        assert orig_share.extendable is False
+        assert new_share.extendable is True
