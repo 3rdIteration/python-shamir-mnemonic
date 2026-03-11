@@ -175,7 +175,7 @@ def decode(mnemonics: Sequence[str], passphrase: str) -> None:
     """
     try:
         passphrase_bytes = passphrase.encode("ascii")
-    except UnicodeDecodeError:
+    except UnicodeEncodeError:
         raise click.ClickException("Passphrase must be ASCII only")
 
     shares = []
@@ -258,7 +258,7 @@ def decode(mnemonics: Sequence[str], passphrase: str) -> None:
 
     master_secret = ems.decrypt(passphrase_bytes)
     click.echo(
-        f"  {style('Master Secret (decrypted, extendable=' + str(ems.extendable) + '):', fg='cyan')} "
+        f"  {style(f'Master Secret (decrypted, extendable={ems.extendable}):', fg='cyan')} "
         f"{master_secret.hex()}"
     )
 
