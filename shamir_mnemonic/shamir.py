@@ -921,3 +921,73 @@ def recover_from_era_shares(
         recovered_ems=recovered_ems,
         recovered_passphrase_secret=recovered_pp_secret,
     )
+
+
+def recover_from_era_shares_brute_force_id(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    verify_ms: bytes,
+    original_extendable: bool = False,
+    original_iteration_exponent: Optional[int] = None,
+    progress_callback: Optional[Any] = None,
+) -> Optional[Tuple[EraRecoveryResult, int]]:
+    """Brute-force the original identifier for non-extendable ERA recovery.
+
+    For **non-extendable** shares where ERA reworked with a different
+    identifier, the original identifier is needed for recovery because
+    the identifier is part of the Feistel cipher salt.
+
+    If the user doesn't know the original identifier (e.g. lost the
+    original Trezor shares), this function tries all 32768 possible
+    identifiers (15-bit space) until it finds one that produces the
+    expected passphrase master secret.
+
+    :param mnemonics: ERA-mangled mnemonic shares (enough to meet threshold).
+    :param passphrase: The user's original passphrase.
+    :param verify_ms: Expected passphrase master secret to verify against.
+        This is needed to know when the correct identifier is found.
+    :param original_extendable: Original extendable flag (typically False
+        for non-extendable shares).
+    :param original_iteration_exponent: Override the iteration exponent.
+        If None, uses the value from the ERA shares.
+    :param progress_callback: Optional callback ``f(current, total)``
+        called after each identifier attempt for progress reporting.
+    :return: ``(EraRecoveryResult, found_identifier)`` if found, else None.
+    """
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    ms_default = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    orig_ie = (
+        original_iteration_exponent
+        if original_iteration_exponent is not None
+        else ems.iteration_exponent
+    )
+
+    total = 1 << ID_LENGTH_BITS  # 32768
+
+    for candidate_id in range(total):
+        if progress_callback is not None:
+            progress_callback(candidate_id, total)
+
+        recovered_ems = cipher.encrypt(
+            ms_default, b"", orig_ie, candidate_id, original_extendable
+        )
+        recovered_ms = cipher.decrypt(
+            recovered_ems, passphrase, orig_ie, candidate_id, original_extendable
+        )
+
+        if recovered_ms == verify_ms:
+            return (
+                EraRecoveryResult(
+                    default_master_secret=ms_default,
+                    recovered_ems=recovered_ems,
+                    recovered_passphrase_secret=recovered_ms,
+                ),
+                candidate_id,
+            )
+
+    return None

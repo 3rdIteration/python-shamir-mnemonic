@@ -12,7 +12,11 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import generate_mnemonics, recover_from_era_shares
+from .shamir import (
+    generate_mnemonics,
+    recover_from_era_shares,
+    recover_from_era_shares_brute_force_id,
+)
 from .share import Share
 from .utils import MnemonicError
 
@@ -266,11 +270,28 @@ def recover(passphrase_prompt: bool) -> None:
     "If not provided, uses the value from the ERA shares. "
     "Needed when ERA changed it during import (e.g. Trezor used 1 but ERA stored 0).",
 )
+@click.option(
+    "-B",
+    "--brute-force-identifier",
+    is_flag=True,
+    default=False,
+    help="Brute-force the original identifier (for non-extendable shares "
+    "where the original identifier is unknown).  Requires --verify-secret.",
+)
+@click.option(
+    "--verify-secret",
+    type=str,
+    default=None,
+    help="Expected passphrase master secret in hex (used with "
+    "--brute-force-identifier to verify the correct identifier).",
+)
 def recover_era(
     passphrase: str,
     original_extendable: bool,
     original_identifier: int,
     original_iteration_exponent: int,
+    brute_force_identifier: bool,
+    verify_secret: str,
 ) -> None:
     """Recover a passphrase wallet from ERA-mangled SLIP39 shares.
 
@@ -291,7 +312,20 @@ def recover_era(
     \b
     For extendable shares (Trezor Safe 7, current firmware), the
     identifier is irrelevant — no guessing needed.
+
+    \b
+    For non-extendable shares (legacy Trezor), if ERA reworked
+    the shares with a different identifier, you need the original
+    identifier (-I) or can brute-force it (-B --verify-secret HEX).
     """
+    if brute_force_identifier and verify_secret is None:
+        error("--brute-force-identifier requires --verify-secret HEX")
+        sys.exit(1)
+
+    if brute_force_identifier and original_identifier is not None:
+        error("--brute-force-identifier and --original-identifier are mutually exclusive")
+        sys.exit(1)
+
     recovery_state = RecoveryState()
 
     def print_group_status(idx: int) -> None:
@@ -345,21 +379,50 @@ def recover_era(
         error("Passphrase must be ASCII only.")
         sys.exit(1)
 
-    click.echo("\nRecovering passphrase wallet...")
-    try:
-        result = recover_from_era_shares(
+    if brute_force_identifier:
+        verify_ms = bytes.fromhex(verify_secret)
+        click.echo(
+            "\nBrute-forcing identifier (trying 32768 candidates, this may take a while)..."
+        )
+
+        result_tuple = recover_from_era_shares_brute_force_id(
             mnemonics,
             passphrase_bytes,
-            original_identifier=original_identifier,
+            verify_ms=verify_ms,
             original_extendable=original_extendable,
             original_iteration_exponent=original_iteration_exponent,
         )
-    except Exception as e:
-        error(str(e))
-        click.echo("Recovery failed")
-        sys.exit(1)
 
-    click.secho("SUCCESS!", fg="green", bold=True)
+        if result_tuple is None:
+            click.secho("FAILED", fg="red", bold=True)
+            click.echo(
+                "No identifier produced the expected master secret. "
+                "Check your --verify-secret value and passphrase."
+            )
+            sys.exit(1)
+
+        result, found_id = result_tuple
+        click.secho("SUCCESS!", fg="green", bold=True)
+        click.echo(
+            f"Found original identifier:              {style(str(found_id), bold=True)}"
+        )
+    else:
+        click.echo("\nRecovering passphrase wallet...")
+        try:
+            result = recover_from_era_shares(
+                mnemonics,
+                passphrase_bytes,
+                original_identifier=original_identifier,
+                original_extendable=original_extendable,
+                original_iteration_exponent=original_iteration_exponent,
+            )
+        except Exception as e:
+            error(str(e))
+            click.echo("Recovery failed")
+            sys.exit(1)
+
+        click.secho("SUCCESS!", fg="green", bold=True)
+
     click.echo(
         f"Default master secret (no passphrase): {style(result.default_master_secret.hex(), bold=True)}"
     )

@@ -638,7 +638,8 @@ can be read from its metadata.
 of the salt.  However, ERA's passphrase wallet is already correct for
 non-extendable shares (Bug 2 is a no-op), so recovery is only needed if ERA
 reworked the shares with a changed identifier.  Even then, the 15-bit
-identifier space (0–32767) can be brute-forced in under a second.
+identifier space (0–32767) can be brute-forced (a few minutes with
+`--brute-force-identifier`).
 
 ### Recovery Matrix
 
@@ -691,6 +692,10 @@ Options:
 - `--extendable` / `--no-extendable` — original share type (default: extendable)
 - `--original-identifier` / `-I` — override identifier (only for non-extendable
   ERA-reworked shares where the identifier changed)
+- `--brute-force-identifier` / `-B` — try all 32768 identifiers (for
+  non-extendable shares where the original identifier is unknown)
+- `--verify-secret` — expected passphrase master secret in hex (required
+  with `--brute-force-identifier` to know when the correct identifier is found)
 
 To run from a local checkout without installing:
 
@@ -742,6 +747,37 @@ SUCCESS!
 Default master secret (no passphrase): 19b66f8284a53453c7ae9f1b781499ee
 Recovered passphrase master secret:     b2c7ff3a404de4a18853cc5d77031f97
 ```
+
+### Non-Extendable Recovery
+
+For **non-extendable** shares (legacy Trezor firmware), recovery is only
+needed if ERA **reworked** the shares with a different identifier.  If ERA
+only imported them (without reworking), the passphrase wallet is already
+correct.
+
+When recovery IS needed (ERA reworked with a new identifier), you need the
+**original identifier**.  There are two ways to get it:
+
+**Option A: Read from original Trezor shares** (if you still have them)
+
+Use `--no-extendable` and `--original-identifier`:
+
+```console
+$ shamir recover-era --passphrase TREZOR --no-extendable --original-identifier 12345
+```
+
+**Option B: Brute-force** (if original shares are lost)
+
+The identifier is only 15 bits (0–32767).  Use `--brute-force-identifier`
+with `--verify-secret` (the expected passphrase master secret in hex):
+
+```console
+$ shamir recover-era --passphrase TREZOR --no-extendable \
+    --brute-force-identifier --verify-secret <expected_ms_hex>
+```
+
+The brute-force tries all 32768 possible identifiers.  This takes a few
+minutes for iteration_exponent=0, longer for higher values.
 
 ---
 

@@ -93,6 +93,15 @@ To recover a passphrase wallet from ERA-mangled SLIP39 shares (see the
 Use :code:`-E` to supply the original Trezor iteration exponent if ERA changed it
 during import (check the original Trezor share metadata).
 
+For **non-extendable** shares (legacy Trezor), use :code:`-X` (no-extendable) and
+:code:`-I` (original identifier).  If the original identifier is unknown, use
+:code:`-B` (brute-force) with :code:`--verify-secret`:
+
+.. code-block:: console
+
+    $ shamir recover-era -p TREZOR -X -I 12345
+    $ shamir recover-era -p TREZOR -X -B --verify-secret <expected_ms_hex>
+
 Use :code:`shamir --help` or :code:`shamir create --help` to see all available options.
 
 If you want to run the CLI from a local checkout without installing, you can use

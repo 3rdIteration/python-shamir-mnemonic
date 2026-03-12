@@ -1217,7 +1217,47 @@ def test_recovery_nonextendable_reworked_needs_original_id():
     assert good.recovered_passphrase_secret == MS
 
 
-def test_recovery_summary_matrix():
+def test_recovery_nonextendable_brute_force_identifier():
+    """
+    When the original identifier is unknown (e.g. original Trezor shares lost),
+    brute-force search over the 15-bit identifier space (0-32767) can find it.
+
+    This test creates non-extendable shares, ERA-reworks them with a different
+    identifier, then uses recover_from_era_shares_brute_force_id() to find the
+    original identifier by matching against the known passphrase master secret.
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=0
+    )[0]
+
+    groups = shamir.decode_mnemonics(trezor_shares[:3])
+    original_id = shamir.recover_ems(groups).identifier
+
+    # ERA reworks with a different identifier
+    new_id = (original_id + 1) % (1 << 15)
+    rework = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+        new_identifier=new_id,
+    )
+
+    # Brute-force: finds the correct identifier
+    result_tuple = shamir.recover_from_era_shares_brute_force_id(
+        rework.reworked_shares[:2],
+        passphrase=passphrase,
+        verify_ms=MS,
+        original_extendable=False,
+    )
+    assert result_tuple is not None
+    result, found_id = result_tuple
+    assert found_id == original_id
+    assert result.recovered_passphrase_secret == MS
+    assert result.default_master_secret == shamir.combine_mnemonics(
+        rework.reworked_shares[:2], b""
+    )
     """
     Summary: what information is needed for recovery in each scenario?
 
