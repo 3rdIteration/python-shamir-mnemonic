@@ -192,9 +192,9 @@ ERA's implementation creates a unique "dialect" of SLIP39:
   potentially wrong EMS
 
 This means ERA is only **fully compatible with other ERA wallet instances**
-running the same buggy code.  Any standard-compliant implementation (Trezor,
-Ledger, Coldcard, or the reference Python library) will produce different
-results when the bugs are triggered.
+running the same buggy code.  Any standard-compliant implementation (Trezor
+or the reference Python library) will produce different results when the
+bugs are triggered.
 
 ### The "Compatibility Island"
 
@@ -209,15 +209,15 @@ results when the bugs are triggered.
                                    │
                     Only fully compatible with itself
                                    │
-     ┌─────────────────────────────┼─────────────────────────────┐
-     │                             │                             │
-     ▼                             ▼                             ▼
-┌──────────┐              ┌──────────────┐              ┌──────────────┐
-│  Trezor  │              │   Coldcard   │              │  Reference   │
-│(standard)│              │  (standard)  │              │   Library    │
-└──────────┘              └──────────────┘              └──────────────┘
-     │                             │                             │
-     └─────────────────────────────┼─────────────────────────────┘
+              ┌────────────────────┼────────────────────┐
+              │                                         │
+              ▼                                         ▼
+        ┌──────────┐                           ┌──────────────┐
+        │  Trezor  │                           │  Reference   │
+        │(standard)│                           │   Library    │
+        └──────────┘                           └──────────────┘
+              │                                         │
+              └────────────────────┼────────────────────┘
                                    │
                     Fully compatible with each other
                     (standard SLIP39 implementations)
