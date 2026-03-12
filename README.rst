@@ -88,7 +88,10 @@ To recover a passphrase wallet from ERA-mangled SLIP39 shares (see the
 
 .. code-block:: console
 
-    $ shamir recover-era --passphrase TREZOR   # for extendable shares (Trezor Safe 7)
+    $ shamir recover-era --passphrase TREZOR --iteration-exponent 1
+
+Use :code:`-E` to supply the original Trezor iteration exponent if ERA changed it
+during import (check the original Trezor share metadata).
 
 Use :code:`shamir --help` or :code:`shamir create --help` to see all available options.
 
@@ -100,7 +103,7 @@ commands:
 
     $ python3 -m shamir_mnemonic.cli create 3of5
     $ python3 -m shamir_mnemonic.cli recover
-    $ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR
+    $ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR -E 1
 
 Test vectors
 ------------

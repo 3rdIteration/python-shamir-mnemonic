@@ -256,10 +256,21 @@ def recover(passphrase_prompt: bool) -> None:
     help="Override the share identifier (only needed for non-extendable "
     "ERA-reworked shares where the identifier changed).",
 )
+@click.option(
+    "-E",
+    "--iteration-exponent",
+    "original_iteration_exponent",
+    type=int,
+    default=None,
+    help="Original iteration exponent from the Trezor shares. "
+    "If not provided, uses the value from the ERA shares. "
+    "Needed when ERA changed it during import (e.g. Trezor used 1 but ERA stored 0).",
+)
 def recover_era(
     passphrase: str,
     original_extendable: bool,
     original_identifier: int,
+    original_iteration_exponent: int,
 ) -> None:
     """Recover a passphrase wallet from ERA-mangled SLIP39 shares.
 
@@ -341,6 +352,7 @@ def recover_era(
             passphrase_bytes,
             original_identifier=original_identifier,
             original_extendable=original_extendable,
+            original_iteration_exponent=original_iteration_exponent,
         )
     except Exception as e:
         error(str(e))

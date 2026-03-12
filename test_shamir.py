@@ -1287,6 +1287,73 @@ def test_recovery_summary_matrix():
             ), f"{ext_label} reworked: recovery works with original id"
 
 
+def test_recovery_real_world_era_changed_iteration_exponent():
+    """
+    Real-world test case: Trezor Safe 7 share (extendable, ie=1) imported
+    into ERA wallet, which re-generated shares with ie=0.
+
+    Original Trezor share (1-of-1, extendable, ie=1):
+      center industry academic academic demand squeeze reaction detect
+      snapshot inside surface rhythm owner revenue careful beam fake
+      brother rocky froth
+
+    ERA-mangled shares (2-of-2, non-extendable, ie=0):
+      mason walnut academic agency civil scholar liberty funding edge
+      capture kidney academic dominant fragment pickup ancestor grin
+      beam welcome scramble
+
+      mason walnut academic acid category clinic sidewalk syndrome plot
+      view obesity sled drink aunt gesture flash decent pajamas sharp step
+
+    ERA preserved the default master secret (19b66f82...) but the
+    passphrase "test" gives the WRONG result (3a0fb8e6... instead of
+    b2c7ff3a...) because ERA changed both extendable (True→False) and
+    iteration_exponent (1→0).
+
+    Recovery requires specifying original_extendable=True AND
+    original_iteration_exponent=1.
+    """
+    era_shares = [
+        "mason walnut academic agency civil scholar liberty funding edge "
+        "capture kidney academic dominant fragment pickup ancestor grin "
+        "beam welcome scramble",
+        "mason walnut academic acid category clinic sidewalk syndrome plot "
+        "view obesity sled drink aunt gesture flash decent pajamas sharp step",
+    ]
+    passphrase = b"test"
+
+    expected_default_ms = bytes.fromhex("19b66f8284a53453c7ae9f1b781499ee")
+    expected_passphrase_ms = bytes.fromhex("b2c7ff3a404de4a18853cc5d77031f97")
+    era_wrong_passphrase_ms = bytes.fromhex("3a0fb8e642cbbe0b48949ccf043d341f")
+
+    # Standard recovery with ERA's own parameters gives WRONG passphrase result
+    wrong = shamir.combine_mnemonics(era_shares, passphrase)
+    assert wrong == era_wrong_passphrase_ms
+
+    # Default MS is correct (ERA always preserves this)
+    default = shamir.combine_mnemonics(era_shares, b"")
+    assert default == expected_default_ms
+
+    # Recovery with original iteration exponent gives CORRECT result
+    result = shamir.recover_from_era_shares(
+        era_shares,
+        passphrase=passphrase,
+        original_extendable=True,
+        original_iteration_exponent=1,
+    )
+    assert result.default_master_secret == expected_default_ms
+    assert result.recovered_passphrase_secret == expected_passphrase_ms
+
+    # Also verify: the original Trezor share produces the same results
+    trezor_share = [
+        "center industry academic academic demand squeeze reaction detect "
+        "snapshot inside surface rhythm owner revenue careful beam fake "
+        "brother rocky froth"
+    ]
+    assert shamir.combine_mnemonics(trezor_share, b"") == expected_default_ms
+    assert shamir.combine_mnemonics(trezor_share, passphrase) == expected_passphrase_ms
+
+
 # ---------------------------------------------------------------------------
 # Passphrase compatibility tests
 # ---------------------------------------------------------------------------

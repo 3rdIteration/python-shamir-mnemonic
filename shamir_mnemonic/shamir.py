@@ -843,6 +843,7 @@ def recover_from_era_shares(
     passphrase: bytes,
     original_identifier: Optional[int] = None,
     original_extendable: Optional[bool] = None,
+    original_iteration_exponent: Optional[int] = None,
 ) -> EraRecoveryResult:
     """Recover the correct passphrase wallet from ERA-mangled SLIP39 shares.
 
@@ -865,6 +866,11 @@ def recover_from_era_shares(
     non-extendable ERA-imported shares the passphrase wallet is already
     correct, so this function is only needed after identifier-changing rework.
 
+    ERA may also change the **iteration exponent** during import.  If the
+    original Trezor shares used a different iteration exponent than what ERA
+    stored in its re-generated shares, supply ``original_iteration_exponent``.
+    The original value can be read from the original Trezor share metadata.
+
     :param mnemonics: ERA-mangled mnemonic shares (enough to meet threshold).
     :param passphrase: The user's original passphrase.
     :param original_identifier: Override the identifier from the share
@@ -873,6 +879,10 @@ def recover_from_era_shares(
     :param original_extendable: Override the extendable flag.  Needed when
         the original shares were extendable but ERA's Bug 2 changed the
         stored flag to False.
+    :param original_iteration_exponent: Override the iteration exponent.
+        Needed when ERA changed it during import (e.g. original Trezor
+        used ie=1 but ERA stored ie=0).  The original value is visible
+        in the original Trezor share metadata.
     :return: An :class:`EraRecoveryResult` with the recovered secrets.
     """
     # Step 1: Recover the EMS from the ERA shares.
@@ -890,16 +900,20 @@ def recover_from_era_shares(
     orig_ext = (
         original_extendable if original_extendable is not None else ems.extendable
     )
-    ie = ems.iteration_exponent
+    orig_ie = (
+        original_iteration_exponent
+        if original_iteration_exponent is not None
+        else ems.iteration_exponent
+    )
 
     # Step 4: Reconstruct the original EMS by re-encrypting ms_default with
     # the original parameters.  This reverses ERA's buggy decrypt.
-    recovered_ems = cipher.encrypt(ms_default, b"", ie, orig_id, orig_ext)
+    recovered_ems = cipher.encrypt(ms_default, b"", orig_ie, orig_id, orig_ext)
 
     # Step 5: Decrypt with the user's passphrase to recover the passphrase
     # wallet.
     recovered_pp_secret = cipher.decrypt(
-        recovered_ems, passphrase, ie, orig_id, orig_ext
+        recovered_ems, passphrase, orig_ie, orig_id, orig_ext
     )
 
     return EraRecoveryResult(

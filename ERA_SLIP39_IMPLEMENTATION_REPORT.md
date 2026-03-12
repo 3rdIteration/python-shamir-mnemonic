@@ -626,8 +626,13 @@ always empty.  The identifier has **no effect** on the cipher.  This means:
 
 - `encrypt(ms, pp, ie, ANY_ID, True)` gives the **same result** for any identifier
 - Recovery needs only: `ms_default` + `passphrase` + `iteration_exponent`
-- The `iteration_exponent` is always available in the share metadata
 - **No brute-forcing needed.  No identifier guessing.  Just math.**
+
+**Important:** ERA may also change the **iteration exponent** during import
+(e.g. from 1 to 0).  The recovery must use the **original** iteration
+exponent from the Trezor shares, not the value stored in ERA's re-generated
+shares.  If you still have the original Trezor share, the iteration exponent
+can be read from its metadata.
 
 **For non-extendable shares** (legacy Trezor firmware): the identifier is part
 of the salt.  However, ERA's passphrase wallet is already correct for
@@ -654,14 +659,15 @@ passphrase and now has wrong addresses:
 1. **Get the default master secret** from ERA by combining shares with empty
    passphrase: `ms_default = combine_mnemonics(era_shares, b"")`
 
-2. **Get the iteration exponent** from the share metadata (always available).
+2. **Get the original iteration exponent** from the original Trezor share
+   metadata.  ERA may change this value during import (e.g. from 1 to 0).
 
 3. **Reconstruct the original EMS:**
-   `original_ems = encrypt(ms_default, b"", iteration_exponent, 0, True)`
+   `original_ems = encrypt(ms_default, b"", original_ie, 0, True)`
    (The identifier value doesn't matter — any value works for extendable.)
 
 4. **Decrypt with your passphrase:**
-   `ms_passphrase = decrypt(original_ems, your_passphrase, iteration_exponent, 0, True)`
+   `ms_passphrase = decrypt(original_ems, your_passphrase, original_ie, 0, True)`
 
 5. **Use `ms_passphrase`** as the BIP32 seed to derive your correct addresses.
 
@@ -674,22 +680,14 @@ The library includes a CLI command that automates the recovery interactively.
 Install with `pip install shamir-mnemonic[cli]`, then run:
 
 ```console
-$ shamir recover-era --passphrase TREZOR
-Enter your ERA-mangled SLIP39 shares (enough to meet the threshold).
-When done, the tool will recover your passphrase wallet.
-
-Enter a recovery share: <enter first share>
-Enter a recovery share: <enter second share>
-...
-Recovering passphrase wallet...
-SUCCESS!
-Default master secret (no passphrase): <hex>
-Recovered passphrase master secret:     <hex>
+$ shamir recover-era --passphrase TREZOR --iteration-exponent 1
 ```
 
 Options:
 
 - `--passphrase` / `-p` — your original Trezor passphrase (**required**)
+- `--iteration-exponent` / `-E` — original iteration exponent from the Trezor
+  shares (if ERA changed it during import; read from original share metadata)
 - `--extendable` / `--no-extendable` — original share type (default: extendable)
 - `--original-identifier` / `-I` — override identifier (only for non-extendable
   ERA-reworked shares where the identifier changed)
@@ -697,7 +695,52 @@ Options:
 To run from a local checkout without installing:
 
 ```console
-$ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR
+$ python3 -m shamir_mnemonic.cli recover-era -p TREZOR -E 1
+```
+
+### Real-World Recovery Example
+
+Original Trezor Safe 7 share (1-of-1, extendable, iteration_exponent=1):
+
+    center industry academic academic demand squeeze reaction detect
+    snapshot inside surface rhythm owner revenue careful beam fake
+    brother rocky froth
+
+- Default master secret: `19b66f8284a53453c7ae9f1b781499ee` ✓
+- With passphrase "test": `b2c7ff3a404de4a18853cc5d77031f97` ✓
+
+After import into ERA, the wallet produced mangled shares (2-of-2,
+non-extendable, iteration_exponent=0):
+
+    mason walnut academic agency civil scholar liberty funding edge
+    capture kidney academic dominant fragment pickup ancestor grin
+    beam welcome scramble
+
+    mason walnut academic acid category clinic sidewalk syndrome plot
+    view obesity sled drink aunt gesture flash decent pajamas sharp step
+
+- Default master secret: `19b66f8284a53453c7ae9f1b781499ee` ✓ (correct)
+- With passphrase "test": `3a0fb8e642cbbe0b48949ccf043d341f` ✗ (WRONG)
+
+ERA changed both `extendable` (True→False) and `iteration_exponent` (1→0).
+Recovery:
+
+```console
+$ shamir recover-era --passphrase test --iteration-exponent 1
+Enter your ERA-mangled SLIP39 shares (enough to meet the threshold).
+When done, the tool will recover your passphrase wallet.
+
+Enter a recovery share: mason walnut academic agency civil scholar liberty
+  funding edge capture kidney academic dominant fragment pickup ancestor
+  grin beam welcome scramble
+Enter a recovery share: mason walnut academic acid category clinic sidewalk
+  syndrome plot view obesity sled drink aunt gesture flash decent pajamas
+  sharp step
+
+Recovering passphrase wallet...
+SUCCESS!
+Default master secret (no passphrase): 19b66f8284a53453c7ae9f1b781499ee
+Recovered passphrase master secret:     b2c7ff3a404de4a18853cc5d77031f97
 ```
 
 ---
@@ -717,9 +760,11 @@ $ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR
 
 4. **If you already imported and have wrong addresses:** Your passphrase
    wallet **can be recovered** — see [Section 10](#10-recovery-getting-your-passphrase-wallet-back).
-   For current Trezor (extendable) shares, you only need your ERA shares
-   and your passphrase.  Use `shamir recover-era -p YOUR_PASSPHRASE` from the
-   CLI, or `recover_from_era_shares()` from Python.
+   For current Trezor (extendable) shares, you need your ERA shares,
+   your passphrase, and the original iteration exponent from the Trezor
+   share (if ERA changed it).  Use
+   `shamir recover-era -p YOUR_PASSPHRASE -E ORIGINAL_IE` from the CLI,
+   or `recover_from_era_shares()` from Python.
 
 5. **If you still have original Trezor shares:** They work correctly on a
    Trezor.  You can also use them directly with the reference library.
