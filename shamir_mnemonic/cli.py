@@ -12,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 from .recovery import RecoveryState
-from .shamir import generate_mnemonics
+from .shamir import generate_mnemonics, recover_from_era_shares
 from .share import Share
 from .utils import MnemonicError
 
@@ -230,6 +230,130 @@ def recover(passphrase_prompt: bool) -> None:
         sys.exit(1)
     click.secho("SUCCESS!", fg="green", bold=True)
     click.echo(f"Your master secret is: {master_secret.hex()}")
+
+
+@cli.command("recover-era")
+@click.option(
+    "-p",
+    "--passphrase",
+    required=True,
+    help="The original passphrase used with the Trezor.",
+)
+@click.option(
+    "-x/-X",
+    "--extendable/--no-extendable",
+    "original_extendable",
+    is_flag=True,
+    default=True,
+    help="Original extendable flag (default: extendable). "
+    "Use --no-extendable for legacy non-extendable Trezor shares.",
+)
+@click.option(
+    "-I",
+    "--original-identifier",
+    type=int,
+    default=None,
+    help="Override the share identifier (only needed for non-extendable "
+    "ERA-reworked shares where the identifier changed).",
+)
+def recover_era(
+    passphrase: str,
+    original_extendable: bool,
+    original_identifier: int,
+) -> None:
+    """Recover a passphrase wallet from ERA-mangled SLIP39 shares.
+
+    \b
+    ERA's SLIP39 bugs corrupt passphrase wallets, but the damage is
+    reversible.  This command recovers the correct passphrase-derived
+    master secret from ERA-mangled shares.
+
+    \b
+    How it works:
+      1. Enter your ERA shares (enough to meet the threshold).
+      2. The tool combines them with empty passphrase to get the
+         correct default master secret (ERA always preserves this).
+      3. It reconstructs the original encrypted master secret (EMS).
+      4. It decrypts with your passphrase to recover the correct
+         passphrase wallet.
+
+    \b
+    For extendable shares (Trezor Safe 7, current firmware), the
+    identifier is irrelevant — no guessing needed.
+    """
+    recovery_state = RecoveryState()
+
+    def print_group_status(idx: int) -> None:
+        group_size, group_threshold = recovery_state.group_status(idx)
+        group_prefix = style(recovery_state.group_prefix(idx), bold=True)
+        bi = style(str(group_size), bold=True)
+        if not group_size:
+            click.echo(f"{EMPTY} {bi} shares from group {group_prefix}")
+        else:
+            prefix = FINISHED if group_size >= group_threshold else INPROGRESS
+            bt = style(str(group_threshold), bold=True)
+            click.echo(f"{prefix} {bi} of {bt} shares needed from group {group_prefix}")
+
+    def print_status() -> None:
+        bn = style(str(recovery_state.groups_complete()), bold=True)
+        assert recovery_state.parameters is not None
+        bt = style(str(recovery_state.parameters.group_threshold), bold=True)
+        click.echo()
+        if recovery_state.parameters.group_count > 1:
+            click.echo(f"Completed {bn} of {bt} groups needed:")
+        for i in range(recovery_state.parameters.group_count):
+            print_group_status(i)
+
+    click.echo("Enter your ERA-mangled SLIP39 shares (enough to meet the threshold).")
+    click.echo("When done, the tool will recover your passphrase wallet.\n")
+
+    mnemonics = []
+    while not recovery_state.is_complete():
+        try:
+            mnemonic_str = click.prompt("Enter a recovery share")
+            share = Share.from_mnemonic(mnemonic_str)
+            if not recovery_state.matches(share):
+                error("This mnemonic is not part of the current set. Please try again.")
+                continue
+            if share in recovery_state:
+                error("Share already entered.")
+                continue
+
+            recovery_state.add_share(share)
+            mnemonics.append(mnemonic_str)
+            print_status()
+
+        except click.Abort:
+            return
+        except Exception as e:
+            error(str(e))
+
+    try:
+        passphrase_bytes = passphrase.encode("ascii")
+    except UnicodeDecodeError:
+        error("Passphrase must be ASCII only.")
+        sys.exit(1)
+
+    click.echo("\nRecovering passphrase wallet...")
+    try:
+        result = recover_from_era_shares(
+            mnemonics,
+            passphrase_bytes,
+            original_identifier=original_identifier,
+            original_extendable=original_extendable,
+        )
+    except Exception as e:
+        error(str(e))
+        click.echo("Recovery failed")
+        sys.exit(1)
+
+    click.secho("SUCCESS!", fg="green", bold=True)
+    click.echo(
+        f"Default master secret (no passphrase): {style(result.default_master_secret.hex(), bold=True)}"
+    )
+    click.echo(
+        f"Recovered passphrase master secret:     {style(result.recovered_passphrase_secret.hex(), bold=True)}"
+    )
 
 
 if __name__ == "__main__":

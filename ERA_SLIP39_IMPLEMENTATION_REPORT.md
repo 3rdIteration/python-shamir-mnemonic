@@ -668,6 +668,38 @@ passphrase and now has wrong addresses:
 The `recover_from_era_shares()` function in this library automates this
 process.
 
+### CLI Recovery Tool
+
+The library includes a CLI command that automates the recovery interactively.
+Install with `pip install shamir-mnemonic[cli]`, then run:
+
+```console
+$ shamir recover-era --passphrase TREZOR
+Enter your ERA-mangled SLIP39 shares (enough to meet the threshold).
+When done, the tool will recover your passphrase wallet.
+
+Enter a recovery share: <enter first share>
+Enter a recovery share: <enter second share>
+...
+Recovering passphrase wallet...
+SUCCESS!
+Default master secret (no passphrase): <hex>
+Recovered passphrase master secret:     <hex>
+```
+
+Options:
+
+- `--passphrase` / `-p` — your original Trezor passphrase (**required**)
+- `--extendable` / `--no-extendable` — original share type (default: extendable)
+- `--original-identifier` / `-I` — override identifier (only for non-extendable
+  ERA-reworked shares where the identifier changed)
+
+To run from a local checkout without installing:
+
+```console
+$ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR
+```
+
 ---
 
 ## 11. Recommendations
@@ -686,7 +718,8 @@ process.
 4. **If you already imported and have wrong addresses:** Your passphrase
    wallet **can be recovered** — see [Section 10](#10-recovery-getting-your-passphrase-wallet-back).
    For current Trezor (extendable) shares, you only need your ERA shares
-   and your passphrase.  Use `recover_from_era_shares()` from this library.
+   and your passphrase.  Use `shamir recover-era -p YOUR_PASSPHRASE` from the
+   CLI, or `recover_from_era_shares()` from Python.
 
 5. **If you still have original Trezor shares:** They work correctly on a
    Trezor.  You can also use them directly with the reference library.

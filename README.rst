@@ -83,14 +83,24 @@ You can specify a custom scheme. For example, to create three groups, with 2-of-
 
     $ shamir create custom --group-threshold 3 --group 2 3 --group 2 5 --group 4 5
 
-Use :code:`shamir --help` or :code:`shamir create --help` to see all available options.
-
-If you want to run the CLI from a local checkout without installing, use the following
-command:
+To recover a passphrase wallet from ERA-mangled SLIP39 shares (see the
+`ERA SLIP39 Implementation Report <ERA_SLIP39_IMPLEMENTATION_REPORT.md>`_ for details):
 
 .. code-block:: console
 
-    $ python3 -m shamir_mnemonic.cli
+    $ shamir recover-era --passphrase TREZOR   # for extendable shares (Trezor Safe 7)
+
+Use :code:`shamir --help` or :code:`shamir create --help` to see all available options.
+
+If you want to run the CLI from a local checkout without installing, you can use
+:code:`python3 -m shamir_mnemonic.cli` in place of :code:`shamir`. This works for all
+commands:
+
+.. code-block:: console
+
+    $ python3 -m shamir_mnemonic.cli create 3of5
+    $ python3 -m shamir_mnemonic.cli recover
+    $ python3 -m shamir_mnemonic.cli recover-era --passphrase TREZOR
 
 Test vectors
 ------------
