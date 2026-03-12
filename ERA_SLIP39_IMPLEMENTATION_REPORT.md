@@ -39,7 +39,8 @@ passphrase-protected wallet becomes permanently inaccessible).
 7. [ERA Share Rework (Backup Regeneration)](#7-era-share-rework-backup-regeneration)
 8. [Cross-Device Compatibility](#8-cross-device-compatibility)
 9. [Detailed Code Analysis](#9-detailed-code-analysis)
-10. [Recommendations](#10-recommendations)
+10. [Recovery: Getting Your Passphrase Wallet Back](#10-recovery-getting-your-passphrase-wallet-back)
+11. [Recommendations](#11-recommendations)
 
 ---
 
@@ -449,7 +450,7 @@ compatible with Trezor **even with a passphrase**:
 - Both devices compute the same passphrase-derived wallet
 - **Addresses match** ✅
 
-### Trezor → ERA (DANGEROUS)
+### Trezor → ERA (DANGEROUS — but recoverable)
 
 Current Trezor shares (extendable) imported into ERA with a passphrase:
 
@@ -457,8 +458,11 @@ Current Trezor shares (extendable) imported into ERA with a passphrase:
 - Default AND passphrase wallets show **wrong addresses**
 - No error, no warning
 - **Addresses don't match** ❌
+- **However:** The no-passphrase master secret is always correct, and the
+  passphrase wallet **can be recovered** using `recover_from_era_shares()`
+  — see [Section 10](#10-recovery-getting-your-passphrase-wallet-back)
 
-### ERA-Reworked Shares → New Trezor (CORRUPTED)
+### ERA-Reworked Shares → New Trezor (CORRUPTED — but recoverable)
 
 When ERA reworks shares that were originally from a Trezor (with passphrase):
 
@@ -467,7 +471,9 @@ When ERA reworks shares that were originally from a Trezor (with passphrase):
   addresses**
 - ERA and the new Trezor **agree with each other** (same wrong data)
   but both **disagree with the original Trezor**
-- The original passphrase wallet is **permanently lost** from these shares
+- **However:** For extendable shares, the passphrase wallet is still
+  recoverable because the identifier doesn't affect the cipher — see
+  [Section 10](#10-recovery-getting-your-passphrase-wallet-back)
 
 ### ERA ↔ ERA (COMPATIBLE)
 
@@ -557,7 +563,107 @@ New SLIP39 shares (may encode wrong data)
 
 ---
 
-## 10. Recommendations
+## 10. Recovery: Getting Your Passphrase Wallet Back
+
+ERA's bugs corrupt the passphrase wallet — but the damage is **reversible**.
+The no-passphrase (default) master secret is always correct, and that is
+enough to reconstruct the original EMS and recover the passphrase wallet.
+
+### Why Recovery Works
+
+ERA's Feistel round-trip preserves the no-passphrase master secret through
+its buggy import path:
+
+```
+Original EMS on Trezor
+    │
+    ▼
+ERA decrypts with "" (Bug 1):  ms_default = decrypt(EMS, "", ie, id, ext)
+    │
+    ▼
+ERA re-encrypts (Bug 2):       stored_EMS = encrypt(ms_default, "", ie, id, false)
+    │
+    ▼
+ERA presents default wallet:   decrypt(stored_EMS, "", ie, id, false) = ms_default  ✓ CORRECT
+```
+
+Since `ms_default` is correct, we can **reverse** the process:
+
+```
+ms_default  (correct — from ERA's default wallet)
+    │
+    ▼
+Re-encrypt with ORIGINAL parameters:  recovered_EMS = encrypt(ms_default, "", ie, id, ext)
+    │
+    ▼
+Decrypt with passphrase:               ms_passphrase = decrypt(recovered_EMS, pp, ie, id, ext)
+    │
+    ▼
+RECOVERED passphrase wallet  ✓
+```
+
+### The Key Insight: Extendable Shares Don't Need the Identifier
+
+The SLIP39 Feistel cipher uses a **salt** derived from the identifier and
+extendable flag:
+
+```python
+def _get_salt(identifier, extendable):
+    if extendable:
+        return bytes()                      # ← Empty! Identifier not used!
+    return "shamir" + identifier.to_bytes(2, "big")  # ← Identifier IS used
+```
+
+**For extendable shares** (all current Trezor Safe 7 firmware): the salt is
+always empty.  The identifier has **no effect** on the cipher.  This means:
+
+- `encrypt(ms, pp, ie, ANY_ID, True)` gives the **same result** for any identifier
+- Recovery needs only: `ms_default` + `passphrase` + `iteration_exponent`
+- The `iteration_exponent` is always available in the share metadata
+- **No brute-forcing needed.  No identifier guessing.  Just math.**
+
+**For non-extendable shares** (legacy Trezor firmware): the identifier is part
+of the salt.  However, ERA's passphrase wallet is already correct for
+non-extendable shares (Bug 2 is a no-op), so recovery is only needed if ERA
+reworked the shares with a changed identifier.  Even then, the 15-bit
+identifier space (0–32767) can be brute-forced in under a second.
+
+### Recovery Matrix
+
+| Scenario | Recovery needed? | Identifier needed? | How |
+|----------|------------------|--------------------|-----|
+| **Extendable**, ERA-imported | YES | NO | `ms_default + pp + ie` |
+| **Extendable**, ERA-reworked, same id | YES | NO | `ms_default + pp + ie` |
+| **Extendable**, ERA-reworked, changed id | YES | **NO** (id irrelevant) | `ms_default + pp + ie` |
+| **Non-extendable**, ERA-imported | Not needed (already correct) | — | — |
+| **Non-extendable**, ERA-reworked, same id | Not needed (already correct) | — | — |
+| **Non-extendable**, ERA-reworked, changed id | YES | YES (brute-force 32768) | `ms_default + pp + ie + id` |
+
+### Step-by-Step Recovery Procedure
+
+For a user who imported Trezor Safe 7 (extendable) shares into ERA with a
+passphrase and now has wrong addresses:
+
+1. **Get the default master secret** from ERA by combining shares with empty
+   passphrase: `ms_default = combine_mnemonics(era_shares, b"")`
+
+2. **Get the iteration exponent** from the share metadata (always available).
+
+3. **Reconstruct the original EMS:**
+   `original_ems = encrypt(ms_default, b"", iteration_exponent, 0, True)`
+   (The identifier value doesn't matter — any value works for extendable.)
+
+4. **Decrypt with your passphrase:**
+   `ms_passphrase = decrypt(original_ems, your_passphrase, iteration_exponent, 0, True)`
+
+5. **Use `ms_passphrase`** as the BIP32 seed to derive your correct addresses.
+
+The `recover_from_era_shares()` function in this library automates this
+process.
+
+---
+
+## 11. Recommendations
 
 ### For ERA Wallet Users
 
@@ -565,15 +671,18 @@ New SLIP39 shares (may encode wrong data)
    The addresses will be wrong for current (extendable) Trezor shares.
 
 2. **Do NOT discard original Trezor shares** after importing into ERA.
-   The original shares are the only way to recover the correct wallet.
+   The original shares are the safest way to recover the correct wallet.
 
 3. **Do NOT rely on ERA-reworked shares** as your only backup if the
    original shares came from a Trezor with a passphrase.
 
-4. **If you already imported:** Your original Trezor shares still work
-   correctly on a Trezor.  If you no longer have them, check whether your
-   shares were non-extendable (legacy) — the passphrase wallet may still
-   be recoverable.
+4. **If you already imported and have wrong addresses:** Your passphrase
+   wallet **can be recovered** — see [Section 10](#10-recovery-getting-your-passphrase-wallet-back).
+   For current Trezor (extendable) shares, you only need your ERA shares
+   and your passphrase.  Use `recover_from_era_shares()` from this library.
+
+5. **If you still have original Trezor shares:** They work correctly on a
+   Trezor.  You can also use them directly with the reference library.
 
 ### For ERA Wallet Developers
 
@@ -620,8 +729,13 @@ Key tests:
 | `test_era_native_shares_imported_to_trezor_with_passphrase_is_safe` | ERA→Trezor direction: safe for native shares |
 | `test_era_reworked_shares_imported_to_trezor_with_passphrase_both_wrong` | ERA→Trezor direction: corrupted for reworked shares |
 | `test_upstream_vectors_would_have_caught_era_bugs` | Upstream vectors.json catches both bugs |
+| `test_extendable_salt_is_empty_so_identifier_is_irrelevant` | Extendable cipher ignores identifier |
+| `test_recovery_extendable_ms_default_is_enough` | Recovery: ms_default + passphrase is sufficient |
+| `test_recovery_extendable_reworked_changed_id` | Recovery works even when identifier changed |
+| `test_recovery_summary_matrix` | Complete recovery matrix for all scenarios |
 
-The simulation functions `simulate_era_import()` and `simulate_era_rework()`
+The simulation functions `simulate_era_import()`, `simulate_era_rework()`,
+and `recover_from_era_shares()`
 in [`shamir_mnemonic/shamir.py`](https://github.com/3rdIteration/python-shamir-mnemonic/blob/master/shamir_mnemonic/shamir.py)
 model ERA's exact code paths, with inline references to the ERA C++ source
 ([`Account.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp), [`CryptoModule.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp)).

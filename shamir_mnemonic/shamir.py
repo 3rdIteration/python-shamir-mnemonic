@@ -805,3 +805,105 @@ def simulate_era_rework(
         recovered_without_passphrase=recovered_without_pp,
         original_secret_recoverable=recoverable,
     )
+
+
+@dataclass(frozen=True)
+class EraRecoveryResult:
+    """Result of recovering the correct passphrase wallet from ERA-mangled
+    SLIP39 shares.
+
+    ERA's bugs store wrong entropy, but the **no-passphrase master secret is
+    always correct** — ERA's Feistel round-trip preserves it.  This means we
+    can reconstruct the original EMS from the default master secret and then
+    decrypt with the correct passphrase to recover the passphrase wallet.
+
+    **For extendable shares** (current Trezor Safe 7), the SLIP39 Feistel
+    salt is always empty — the identifier is **not used** in the cipher.
+    Recovery needs only the no-passphrase master secret, the passphrase,
+    and the iteration exponent (embedded in share metadata).
+
+    **For non-extendable shares** (legacy Trezor), the identifier IS part
+    of the Feistel salt.  However, ERA's passphrase wallet is already
+    correct for non-extendable shares (Bug 2 is a no-op), so recovery is
+    only needed if ERA reworked the shares with a changed identifier.
+    """
+
+    default_master_secret: bytes
+    """The correct no-passphrase master secret (ERA always gets this right)."""
+
+    recovered_ems: bytes
+    """The reconstructed original EMS (from re-encrypting the default MS)."""
+
+    recovered_passphrase_secret: bytes
+    """The recovered passphrase-protected master secret."""
+
+
+def recover_from_era_shares(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    original_identifier: Optional[int] = None,
+    original_extendable: Optional[bool] = None,
+) -> EraRecoveryResult:
+    """Recover the correct passphrase wallet from ERA-mangled SLIP39 shares.
+
+    ERA's buggy import always produces the correct no-passphrase master secret
+    (due to the Feistel round-trip property).  This function exploits that:
+
+    1. Combine the ERA shares with empty passphrase to get ``ms_default``.
+    2. Re-encrypt ``ms_default`` with the **original** SLIP39 parameters
+       to reconstruct the original EMS.
+    3. Decrypt the reconstructed EMS with the user's passphrase.
+
+    **For extendable shares** (current Trezor firmware), the identifier does
+    not affect the Feistel cipher (the salt is always empty).  This means
+    the no-passphrase master secret alone is sufficient — no identifier
+    override is needed, even for ERA-reworked shares.
+
+    **For non-extendable shares** (legacy Trezor firmware), the identifier is
+    part of the Feistel salt.  If ERA reworked with a different identifier,
+    the caller must supply ``original_identifier``.  However, for
+    non-extendable ERA-imported shares the passphrase wallet is already
+    correct, so this function is only needed after identifier-changing rework.
+
+    :param mnemonics: ERA-mangled mnemonic shares (enough to meet threshold).
+    :param passphrase: The user's original passphrase.
+    :param original_identifier: Override the identifier from the share
+        metadata.  Only needed for non-extendable ERA-reworked shares where
+        the identifier changed.  Irrelevant for extendable shares.
+    :param original_extendable: Override the extendable flag.  Needed when
+        the original shares were extendable but ERA's Bug 2 changed the
+        stored flag to False.
+    :return: An :class:`EraRecoveryResult` with the recovered secrets.
+    """
+    # Step 1: Recover the EMS from the ERA shares.
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Step 2: Decrypt with empty passphrase to get the default master secret.
+    # ERA's Feistel round-trip guarantees this is correct.
+    ms_default = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    # Step 3: Determine the original SLIP39 parameters.
+    orig_id = original_identifier if original_identifier is not None else ems.identifier
+    orig_ext = (
+        original_extendable if original_extendable is not None else ems.extendable
+    )
+    ie = ems.iteration_exponent
+
+    # Step 4: Reconstruct the original EMS by re-encrypting ms_default with
+    # the original parameters.  This reverses ERA's buggy decrypt.
+    recovered_ems = cipher.encrypt(ms_default, b"", ie, orig_id, orig_ext)
+
+    # Step 5: Decrypt with the user's passphrase to recover the passphrase
+    # wallet.
+    recovered_pp_secret = cipher.decrypt(
+        recovered_ems, passphrase, ie, orig_id, orig_ext
+    )
+
+    return EraRecoveryResult(
+        default_master_secret=ms_default,
+        recovered_ems=recovered_ems,
+        recovered_passphrase_secret=recovered_pp_secret,
+    )

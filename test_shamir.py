@@ -970,6 +970,324 @@ def test_era_rework_new_id_concrete_wallet_destruction():
 
 
 # ---------------------------------------------------------------------------
+# Recovery from ERA-mangled shares
+# ---------------------------------------------------------------------------
+# Key insight: ERA's default (no-passphrase) wallet ALWAYS produces the
+# correct master secret, because the Feistel round-trip preserves it.
+#
+# For EXTENDABLE shares (current Trezor Safe 7), the SLIP39 Feistel salt
+# is always empty — the identifier is NOT used in the cipher at all.
+# This means the no-passphrase master secret + passphrase + iteration
+# exponent is ALL you need.  No brute-forcing, no identifier guessing.
+#
+# For NON-EXTENDABLE shares (legacy Trezor), the identifier IS part of
+# the salt.  But Bug 2 is a no-op for non-extendable shares, so ERA's
+# passphrase wallet is already correct — recovery is only needed if ERA
+# reworked with a changed identifier (and then you need the original id).
+#
+# Recovery formula:
+#   1. ms_default = combine(era_shares, "")                  → correct ✓
+#   2. original_ems = encrypt(ms_default, "", ie, id, ext)   → reconstructed
+#   3. ms_passphrase = decrypt(original_ems, pp, ie, id, ext)→ recovered!
+# ---------------------------------------------------------------------------
+
+
+def test_extendable_salt_is_empty_so_identifier_is_irrelevant():
+    """
+    For extendable SLIP39, the Feistel cipher salt is always empty bytes.
+    The identifier is NOT used in the cipher computation at all.
+
+    This is the critical property that makes recovery simple:
+    encrypt(ms, pp, ie, ANY_ID, True) always gives the same result.
+    """
+    passphrase = b"TREZOR"
+    ie = 1
+
+    ems_id0 = shamir.cipher.encrypt(MS, passphrase, ie, 0, True)
+    ems_id42 = shamir.cipher.encrypt(MS, passphrase, ie, 42, True)
+    ems_id999 = shamir.cipher.encrypt(MS, passphrase, ie, 999, True)
+    ems_id32767 = shamir.cipher.encrypt(MS, passphrase, ie, 32767, True)
+
+    assert (
+        ems_id0 == ems_id42 == ems_id999 == ems_id32767
+    ), "Extendable: identifier does not affect the Feistel cipher"
+
+    # Decrypt also works with any identifier.
+    assert shamir.cipher.decrypt(ems_id0, passphrase, ie, 12345, True) == MS
+
+
+def test_nonextendable_salt_uses_identifier():
+    """
+    For non-extendable SLIP39, the Feistel cipher salt includes the identifier.
+    Different identifiers produce different ciphertexts.
+    """
+    passphrase = b"TREZOR"
+    ie = 1
+
+    ems_id42 = shamir.cipher.encrypt(MS, passphrase, ie, 42, False)
+    ems_id999 = shamir.cipher.encrypt(MS, passphrase, ie, 999, False)
+
+    assert ems_id42 != ems_id999, "Non-extendable: identifier changes the Feistel salt"
+
+
+def test_recovery_extendable_ms_default_is_enough():
+    """
+    For EXTENDABLE shares (current Trezor Safe 7), the no-passphrase
+    master secret IS enough to recover the passphrase wallet.
+
+    Since the identifier is irrelevant to the extendable Feistel cipher,
+    we only need: ms_default + passphrase + iteration_exponent.
+    The iteration_exponent is always available in the share metadata.
+
+    No brute-forcing.  No identifier guessing.  Just math.
+    """
+    passphrase = b"TREZOR"
+
+    # Step 1: Trezor creates extendable shares with passphrase.
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    # Step 2: ERA imports — passphrase wallet is WRONG.
+    era_result = shamir.simulate_era_import(trezor_shares[:3], passphrase=passphrase)
+    assert era_result.passphrase_seed != MS, "ERA passphrase wallet is wrong"
+
+    # Step 3: But ERA's DEFAULT wallet gives the correct no-passphrase MS.
+    # This is all we need for recovery.
+    ms_default = era_result.no_passphrase_seed
+
+    # Step 4: Reconstruct original EMS.  For extendable, identifier is irrelevant.
+    ie = era_result.iteration_exponent
+    recovered_ems = shamir.cipher.encrypt(ms_default, b"", ie, 0, True)
+
+    # Step 5: Decrypt with passphrase → recovered!
+    recovered_ms = shamir.cipher.decrypt(recovered_ems, passphrase, ie, 0, True)
+    assert (
+        recovered_ms == MS
+    ), "RECOVERED: ms_default + passphrase + ie is enough for extendable shares"
+
+    correct_xprv = BIP32Key.fromEntropy(MS).ExtendedKey()
+    recovered_xprv = BIP32Key.fromEntropy(recovered_ms).ExtendedKey()
+    assert recovered_xprv == correct_xprv
+
+
+def test_recovery_extendable_via_helper_function():
+    """
+    Same recovery as above, but using the recover_from_era_shares() helper.
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    recovery = shamir.recover_from_era_shares(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        original_extendable=True,
+    )
+
+    assert recovery.recovered_passphrase_secret == MS
+    assert BIP32Key.fromEntropy(recovery.recovered_passphrase_secret).ExtendedKey() == (
+        BIP32Key.fromEntropy(MS).ExtendedKey()
+    )
+
+
+def test_recovery_extendable_reworked_same_id():
+    """
+    Recovery from ERA-REWORKED extendable shares (identifier preserved).
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    rework = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+        new_identifier=None,
+    )
+
+    recovery = shamir.recover_from_era_shares(
+        rework.reworked_shares[:2],
+        passphrase=passphrase,
+        original_extendable=True,
+    )
+
+    assert recovery.recovered_passphrase_secret == MS
+
+
+def test_recovery_extendable_reworked_changed_id():
+    """
+    Recovery from ERA-REWORKED extendable shares where the identifier CHANGED.
+
+    For extendable shares, the identifier is irrelevant to the cipher —
+    recovery still works without knowing the original identifier.
+    This is the key difference from non-extendable shares.
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=True, iteration_exponent=1
+    )[0]
+
+    # ERA reworks with identifier=0 (worst case — getAccountSlip39Identifier
+    # returned 0 because no active session).
+    rework = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+        new_identifier=0,
+    )
+
+    # Recovery works even WITHOUT knowing the original identifier,
+    # because identifier is irrelevant for extendable shares.
+    recovery = shamir.recover_from_era_shares(
+        rework.reworked_shares[:2],
+        passphrase=passphrase,
+        original_extendable=True,
+        # original_identifier NOT supplied — not needed for extendable!
+    )
+
+    assert recovery.recovered_passphrase_secret == MS, (
+        "Extendable recovery works even when identifier changed — "
+        "because identifier is not part of the extendable Feistel salt"
+    )
+
+
+def test_recovery_nonextendable_already_correct():
+    """
+    For NON-EXTENDABLE ERA-imported shares, the passphrase wallet is
+    already correct (Bug 2 is a no-op).  Recovery is unnecessary but
+    the helper function still works.
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    era_result = shamir.simulate_era_import(trezor_shares[:3], passphrase=passphrase)
+    assert era_result.passphrase_seed == MS, "Already correct for non-extendable"
+
+    recovery = shamir.recover_from_era_shares(trezor_shares[:3], passphrase=passphrase)
+    assert recovery.recovered_passphrase_secret == MS
+
+
+def test_recovery_nonextendable_reworked_needs_original_id():
+    """
+    For NON-EXTENDABLE ERA-reworked shares with a changed identifier,
+    the original identifier IS needed for recovery (because the identifier
+    is part of the non-extendable Feistel salt).
+
+    However, the 15-bit identifier space (0-32767) is small enough to
+    brute-force in under a second.
+    """
+    passphrase = b"TREZOR"
+
+    trezor_shares = shamir.generate_mnemonics(
+        1, [(3, 5)], MS, passphrase, extendable=False, iteration_exponent=1
+    )[0]
+
+    groups = shamir.decode_mnemonics(trezor_shares[:3])
+    original_id = shamir.recover_ems(groups).identifier
+
+    new_id = (original_id + 1) % (1 << 15)
+    rework = shamir.simulate_era_rework(
+        trezor_shares[:3],
+        passphrase=passphrase,
+        rework_groups=((2, 3),),
+        new_identifier=new_id,
+    )
+
+    # Without original identifier: wrong result.
+    bad = shamir.recover_from_era_shares(
+        rework.reworked_shares[:2], passphrase=passphrase
+    )
+    assert bad.recovered_passphrase_secret != MS
+
+    # With original identifier: correct.
+    good = shamir.recover_from_era_shares(
+        rework.reworked_shares[:2],
+        passphrase=passphrase,
+        original_identifier=original_id,
+    )
+    assert good.recovered_passphrase_secret == MS
+
+
+def test_recovery_summary_matrix():
+    """
+    Summary: what information is needed for recovery in each scenario?
+
+    | Scenario                              | Recovery? | Needs original id? |
+    |---------------------------------------|-----------|-------------------|
+    | Extendable, ERA-imported              | YES       | NO (id irrelevant)|
+    | Extendable, ERA-reworked, same id     | YES       | NO (id irrelevant)|
+    | Extendable, ERA-reworked, changed id  | YES       | NO (id irrelevant)|
+    | Non-extendable, ERA-imported          | UNNECESSARY (already correct) |
+    | Non-extendable, ERA-reworked, same id | UNNECESSARY (already correct) |
+    | Non-extendable, ERA-reworked, new id  | YES       | YES (brute-force) |
+    """
+    passphrase = b"TREZOR"
+
+    for ext_label, extendable in [("extendable", True), ("non-extendable", False)]:
+        shares = shamir.generate_mnemonics(
+            1, [(3, 5)], MS, passphrase, extendable=extendable, iteration_exponent=1
+        )[0]
+
+        # ERA import
+        era = shamir.simulate_era_import(shares[:3], passphrase=passphrase)
+
+        if extendable:
+            assert era.passphrase_seed != MS, f"{ext_label}: ERA pp wallet is wrong"
+            recovery = shamir.recover_from_era_shares(
+                shares[:3], passphrase=passphrase, original_extendable=True
+            )
+            assert (
+                recovery.recovered_passphrase_secret == MS
+            ), f"{ext_label}: recovery works"
+        else:
+            assert (
+                era.passphrase_seed == MS
+            ), f"{ext_label}: ERA pp wallet already correct"
+
+        # ERA rework with changed identifier
+        groups = shamir.decode_mnemonics(shares[:3])
+        orig_id = shamir.recover_ems(groups).identifier
+        new_id = (orig_id + 1) % (1 << 15)
+
+        rework = shamir.simulate_era_rework(
+            shares[:3],
+            passphrase=passphrase,
+            rework_groups=((2, 3),),
+            new_identifier=new_id,
+        )
+
+        if extendable:
+            # Extendable: identifier irrelevant — recovery always works
+            recovery = shamir.recover_from_era_shares(
+                rework.reworked_shares[:2],
+                passphrase=passphrase,
+                original_extendable=True,
+            )
+            assert (
+                recovery.recovered_passphrase_secret == MS
+            ), f"{ext_label} reworked: recovery works without original id"
+        else:
+            # Non-extendable with changed id: need original identifier
+            recovery = shamir.recover_from_era_shares(
+                rework.reworked_shares[:2],
+                passphrase=passphrase,
+                original_identifier=orig_id,
+            )
+            assert (
+                recovery.recovered_passphrase_secret == MS
+            ), f"{ext_label} reworked: recovery works with original id"
+
+
+# ---------------------------------------------------------------------------
 # Passphrase compatibility tests
 # ---------------------------------------------------------------------------
 # These tests prove that simulate_era_import works correctly for ANY
