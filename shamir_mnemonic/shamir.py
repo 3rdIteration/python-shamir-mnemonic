@@ -24,6 +24,7 @@ import secrets
 from dataclasses import dataclass
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterable,
     Iterator,
@@ -929,7 +930,7 @@ def recover_from_era_shares_brute_force_id(
     verify_ms: bytes,
     original_extendable: bool = False,
     original_iteration_exponent: Optional[int] = None,
-    progress_callback: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Optional[Tuple[EraRecoveryResult, int]]:
     """Brute-force the original identifier for non-extendable ERA recovery.
 
