@@ -22,7 +22,19 @@
 import hmac
 import secrets
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from . import cipher
 from .constants import (
@@ -475,3 +487,514 @@ def combine_mnemonics(mnemonics: Iterable[str], passphrase: bytes = b"") -> byte
     groups = decode_mnemonics(mnemonics)
     encrypted_master_secret = recover_ems(groups)
     return encrypted_master_secret.decrypt(passphrase)
+
+
+def verify_mnemonics(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    expected_master_secret: bytes,
+) -> None:
+    """
+    Verify that mnemonic shares were encrypted correctly according to their
+    declared parameters (identifier, extendable flag, iteration exponent).
+
+    This function detects shares that were created with mismatched encryption
+    parameters -- for example, shares flagged as non-extendable but encrypted
+    with an empty salt (as if extendable). Such a mismatch breaks the security
+    guarantee of non-extendable shares, making them reworkable despite being
+    marked otherwise.
+
+    :param mnemonics: List of mnemonics.
+    :param passphrase: The passphrase used to encrypt the master secret.
+    :param expected_master_secret: The known-correct master secret to verify against.
+    :raises MnemonicError: If the shares have a salt/extendable flag mismatch or
+        do not match the expected master secret.
+    """
+
+    if not mnemonics:
+        raise MnemonicError("The list of mnemonics is empty.")
+
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Decrypt using the declared parameters from the share metadata.
+    decrypted = ems.decrypt(passphrase)
+
+    if decrypted == expected_master_secret:
+        return
+
+    # The declared parameters did not produce the expected master secret.
+    # Try decrypting with the opposite extendable flag to diagnose a
+    # specific salt mismatch (e.g. non-extendable flag but empty salt).
+    alt_ems = EncryptedMasterSecret(
+        ems.identifier, not ems.extendable, ems.iteration_exponent, ems.ciphertext
+    )
+    alt_decrypted = alt_ems.decrypt(passphrase)
+
+    if alt_decrypted == expected_master_secret:
+        if ems.extendable:
+            raise MnemonicError(
+                "Share extendable flag mismatch: shares are flagged as extendable "
+                "but were encrypted with the non-extendable salt "
+                "(customization string + identifier). "
+                "The shares will not be interoperable with compliant implementations."
+            )
+        else:
+            raise MnemonicError(
+                "Share extendable flag mismatch: shares are flagged as non-extendable "
+                "but were encrypted with an empty salt (extendable mode). "
+                "This means the non-extendable security property is not enforced -- "
+                "the shares are effectively reworkable despite being marked otherwise."
+            )
+
+    raise MnemonicError(
+        "The shares do not match the expected master secret with either "
+        "extendable or non-extendable encryption parameters."
+    )
+
+
+@dataclass(frozen=True)
+class EraImportResult:
+    """Diagnostic result from simulating ERA wallet's SLIP39 import path.
+
+    ERA wallet (ERAWLT/ERA-crypto-p) has two bugs in its SLIP39 handling:
+
+    Bug 1 — Passphrase ignored during import:
+      ``decodeShamirShares()`` and ``addAccount()`` always call
+      ``encryptedMasterSecret.decrypt("")`` regardless of any user passphrase,
+      so the stored "entropy" is wrong for passphrase-protected shares.
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
+
+    Bug 2 — extendable flag hardcoded False during re-encryption:
+      The ``Account`` constructor always calls
+      ``EncryptedMasterSecret::fromMasterSecret(entropy, "", id, false, ie)``
+      with ``extendable=false`` when re-encrypting for storage.
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
+
+    Due to the Feistel cipher round-trip property
+    ``encrypt(decrypt(ct, S), S) = ct``, when the same (empty) passphrase and
+    same salt are used for both decrypt and re-encrypt, the original ciphertext
+    is paradoxically preserved. This means the stored EMS is often identical to
+    the original, and entering the correct passphrase later may still produce
+    correct keys. However, the stored *entropy* is wrong.
+    """
+
+    stored_entropy: bytes
+    """What ERA stores as the account's entropy — wrong for passphrase-protected shares."""
+
+    stored_ems: bytes
+    """The EMS ciphertext ERA stores. Identical to the original when id/ie are preserved."""
+
+    identifier: int
+    """The SLIP39 identifier from the original shares."""
+
+    iteration_exponent: int
+    """The iteration exponent from the original shares."""
+
+    extendable: bool
+    """The extendable flag from the original shares."""
+
+    no_passphrase_seed: bytes
+    """The seed ERA derives for the no-passphrase wallet (may be wrong)."""
+
+    passphrase_seed: bytes
+    """The seed ERA derives when user enters the passphrase."""
+
+    correct_master_secret: bytes
+    """What a compliant implementation would recover with the same passphrase."""
+
+
+def simulate_era_import(
+    mnemonics: Iterable[str],
+    passphrase: bytes = b"",
+) -> EraImportResult:
+    """Simulate ERA wallet's SLIP39 import path and return diagnostic info.
+
+    This function models the exact code path in the ERA wallet
+    (``ERAWLT/ERA-crypto-p``,
+    `Account.cpp <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp>`_)
+    when SLIP39 shares are imported:
+
+    1. ``decodeShamirShares`` / ``addAccount`` recover the EMS from shares.
+    2. ERA decrypts the EMS with an **empty** passphrase (Bug 1) to obtain
+       the "entropy" it stores internally.
+    3. ERA re-encrypts the stored entropy with ``extendable=false`` (Bug 2)
+       and the original identifier/iteration-exponent to produce a new EMS
+       for storage.
+    4. For the no-passphrase wallet, ERA decrypts the stored EMS with ``""``.
+    5. When the user enters a passphrase, ERA decrypts the stored EMS with
+       that passphrase — this step uses ``extendable=false`` unconditionally.
+
+    :param mnemonics: SLIP39 mnemonic shares (enough to meet the threshold).
+    :param passphrase: The passphrase the user would enter in ERA wallet.
+    :return: An :class:`EraImportResult` with all intermediate values.
+    """
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Bug 1: ERA always decrypts with empty passphrase.
+    era_entropy = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    # Bug 2: ERA re-encrypts with extendable=False (hardcoded), empty passphrase.
+    era_ems = cipher.encrypt(
+        era_entropy,
+        b"",
+        ems.iteration_exponent,
+        ems.identifier,
+        False,  # ERA always uses extendable=False
+    )
+
+    # ERA's no-passphrase seed: decrypt(stored_ems, "", ie, id, False)
+    no_pp_seed = cipher.decrypt(
+        era_ems, b"", ems.iteration_exponent, ems.identifier, False
+    )
+
+    # ERA's passphrase seed: decrypt(stored_ems, passphrase, ie, id, False)
+    pp_seed = cipher.decrypt(
+        era_ems, passphrase, ems.iteration_exponent, ems.identifier, False
+    )
+
+    # What a compliant implementation would get.
+    correct_ms = ems.decrypt(passphrase)
+
+    return EraImportResult(
+        stored_entropy=era_entropy,
+        stored_ems=era_ems,
+        identifier=ems.identifier,
+        iteration_exponent=ems.iteration_exponent,
+        extendable=ems.extendable,
+        no_passphrase_seed=no_pp_seed,
+        passphrase_seed=pp_seed,
+        correct_master_secret=correct_ms,
+    )
+
+
+@dataclass(frozen=True)
+class EraReworkResult:
+    """Diagnostic result from simulating ERA wallet's SLIP39 rework (backup regeneration).
+
+    When the ERA wallet regenerates SLIP39 shares (e.g. to change threshold or
+    share count), it follows this path (``CryptoModule::createMnemonic`` →
+    ``AccountsManager::generateMnemonicSLIP39``):
+
+    1. Read the stored entropy from the account's ``AccountSecureData``.
+    2. Call ``generateMnemonics(1, groups, entropy, "", identifier, false, ie)``
+       with the stored identifier from ``getSlip39Identifier()`` and stored
+       iteration exponent from ``getSlip39IterationExponent()``.
+
+    **There is no validation or blocking** in the ERA wallet code to prevent
+    rework of passphrase-protected shares.  The code does not:
+    - Check whether the stored entropy was derived with a passphrase
+    - Warn the user that rework with wrong entropy will produce bad shares
+    - Preserve the original EMS ciphertext during rework
+
+    The ``createMnemonic`` function receives the identifier and iteration
+    exponent from ``CryptoModule::getAccountSlip39Identifier()`` and
+    ``CryptoModule::getAccountSlip39IterationExponent()``.  If the account
+    has no active session (``_getActiveAccount({})`` returns null), these
+    functions return **0**, which means a different (zero) identifier could
+    be used silently — breaking the Feistel round-trip property.
+    """
+
+    original_identifier: int
+    """The SLIP39 identifier from the original shares."""
+
+    rework_identifier: int
+    """The identifier used during rework (may differ if account session is lost)."""
+
+    stored_entropy: bytes
+    """What ERA stored as entropy (wrong for passphrase-protected shares)."""
+
+    reworked_ems: bytes
+    """The EMS ciphertext in the reworked shares."""
+
+    reworked_shares: List[str]
+    """The mnemonic shares produced by the rework."""
+
+    recovered_with_passphrase: bytes
+    """What a compliant tool recovers from reworked shares WITH the original passphrase."""
+
+    recovered_without_passphrase: bytes
+    """What a compliant tool recovers from reworked shares WITHOUT passphrase."""
+
+    original_secret_recoverable: bool
+    """Whether the original master secret can be recovered from the reworked shares."""
+
+
+def simulate_era_rework(
+    mnemonics: Iterable[str],
+    passphrase: bytes = b"",
+    rework_groups: Sequence[Tuple[int, int]] = ((2, 3),),
+    new_identifier: Optional[int] = None,
+) -> EraReworkResult:
+    """Simulate ERA wallet's SLIP39 rework (backup regeneration) path.
+
+    This models what happens when the ERA wallet regenerates SLIP39 shares
+    from stored account data.  The ERA code path is:
+
+    ``CryptoModule::createMnemonic`` → ``AccountsManager::generateMnemonicSLIP39``
+    → ``ShamirMnemonic::generateMnemonics(1, groups, entropy, "", id, false, ie)``
+
+    The entropy comes from ``AccountSecureData::entropy``, which was stored
+    during import by decrypting the EMS with an empty passphrase (Bug 1).
+
+    The identifier comes from ``CryptoModule::getAccountSlip39Identifier()``,
+    which reads ``AccountSecureData::slip39Id`` via the cached active account.
+    In normal operation, the active account is always cached and returns the
+    **original identifier** from the imported shares.  The ``return 0``
+    fallback in ``getAccountSlip39Identifier()`` is a defensive null check
+    that only triggers when no active account is available (login failure,
+    account locked, or secure storage error) — states where backup rework
+    is impossible anyway.
+
+    **ERA has NO code to block this rework path for passphrase-protected shares.**
+    Specifically:
+
+    - `generateMnemonicSLIP39 <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127>`_
+      (Account.cpp:102-127) takes entropy and
+      identifier as parameters and calls ``generateMnemonics`` with
+      ``extendable=false`` and an **empty passphrase** unconditionally.
+    - There is no check for whether the entropy was originally passphrase-protected.
+    - There is no warning or error when reworking passphrase-protected shares.
+    - The `createMnemonic <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408>`_
+      API (CryptoModule.cpp:394-408) simply forwards
+      parameters without validation.
+
+    :param mnemonics: Original SLIP39 mnemonic shares.
+    :param passphrase: The original passphrase used to create the shares.
+    :param rework_groups: The new group scheme for reworked shares.
+    :param new_identifier: If set, use this identifier for rework (simulates
+        the hypothetical case where ``getAccountSlip39Identifier()`` returns a
+        different value, e.g. 0).  If None, use the original identifier — this
+        is what happens in normal ERA operation.
+    :return: An :class:`EraReworkResult` with diagnostic info.
+    """
+    # Step 1: Import into ERA (to get the stored entropy).
+    import_result = simulate_era_import(mnemonics, passphrase)
+
+    rework_id = (
+        new_identifier if new_identifier is not None else import_result.identifier
+    )
+    ie = import_result.iteration_exponent
+
+    # Step 2: ERA calls generateMnemonicSLIP39(entropy, "", id, false, ie)
+    # This is Account.cpp line 113:
+    #   generateMnemonics(1, groups, entropy, "", identifier, false, iterationExponent)
+    reworked_ems_obj = EncryptedMasterSecret.from_master_secret(
+        import_result.stored_entropy,
+        b"",  # ERA always uses empty passphrase
+        rework_id,
+        False,  # ERA hardcodes extendable=False
+        ie,
+    )
+
+    grouped_shares = split_ems(1, list(rework_groups), reworked_ems_obj)
+    reworked_mnemonics = [share.mnemonic() for share in grouped_shares[0]]
+
+    # Step 3: What does a compliant tool get from these reworked shares?
+    threshold = rework_groups[0][0]
+    recovered_with_pp = combine_mnemonics(reworked_mnemonics[:threshold], passphrase)
+    recovered_without_pp = combine_mnemonics(reworked_mnemonics[:threshold])
+
+    correct_ms = import_result.correct_master_secret
+    recoverable = recovered_with_pp == correct_ms or recovered_without_pp == correct_ms
+
+    return EraReworkResult(
+        original_identifier=import_result.identifier,
+        rework_identifier=rework_id,
+        stored_entropy=import_result.stored_entropy,
+        reworked_ems=reworked_ems_obj.ciphertext,
+        reworked_shares=reworked_mnemonics,
+        recovered_with_passphrase=recovered_with_pp,
+        recovered_without_passphrase=recovered_without_pp,
+        original_secret_recoverable=recoverable,
+    )
+
+
+@dataclass(frozen=True)
+class EraRecoveryResult:
+    """Result of recovering the correct passphrase wallet from ERA-mangled
+    SLIP39 shares.
+
+    ERA's bugs store wrong entropy, but the **no-passphrase master secret is
+    always correct** — ERA's Feistel round-trip preserves it.  This means we
+    can reconstruct the original EMS from the default master secret and then
+    decrypt with the correct passphrase to recover the passphrase wallet.
+
+    **For extendable shares** (current Trezor Safe 7), the SLIP39 Feistel
+    salt is always empty — the identifier is **not used** in the cipher.
+    Recovery needs only the no-passphrase master secret, the passphrase,
+    and the iteration exponent (embedded in share metadata).
+
+    **For non-extendable shares** (legacy Trezor), the identifier IS part
+    of the Feistel salt.  However, ERA's passphrase wallet is already
+    correct for non-extendable shares (Bug 2 is a no-op), so recovery is
+    only needed if ERA reworked the shares with a changed identifier.
+    """
+
+    default_master_secret: bytes
+    """The correct no-passphrase master secret (ERA always gets this right)."""
+
+    recovered_ems: bytes
+    """The reconstructed original EMS (from re-encrypting the default MS)."""
+
+    recovered_passphrase_secret: bytes
+    """The recovered passphrase-protected master secret."""
+
+
+def recover_from_era_shares(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    original_identifier: Optional[int] = None,
+    original_extendable: Optional[bool] = None,
+    original_iteration_exponent: Optional[int] = None,
+) -> EraRecoveryResult:
+    """Recover the correct passphrase wallet from ERA-mangled SLIP39 shares.
+
+    ERA's buggy import always produces the correct no-passphrase master secret
+    (due to the Feistel round-trip property).  This function exploits that:
+
+    1. Combine the ERA shares with empty passphrase to get ``ms_default``.
+    2. Re-encrypt ``ms_default`` with the **original** SLIP39 parameters
+       to reconstruct the original EMS.
+    3. Decrypt the reconstructed EMS with the user's passphrase.
+
+    **For extendable shares** (current Trezor firmware), the identifier does
+    not affect the Feistel cipher (the salt is always empty).  This means
+    the no-passphrase master secret alone is sufficient — no identifier
+    override is needed, even for ERA-reworked shares.
+
+    **For non-extendable shares** (legacy Trezor firmware), the identifier is
+    part of the Feistel salt.  If ERA reworked with a different identifier,
+    the caller must supply ``original_identifier``.  However, for
+    non-extendable ERA-imported shares the passphrase wallet is already
+    correct, so this function is only needed after identifier-changing rework.
+
+    ERA may also change the **iteration exponent** during import.  If the
+    original Trezor shares used a different iteration exponent than what ERA
+    stored in its re-generated shares, supply ``original_iteration_exponent``.
+    The original value can be read from the original Trezor share metadata.
+
+    :param mnemonics: ERA-mangled mnemonic shares (enough to meet threshold).
+    :param passphrase: The user's original passphrase.
+    :param original_identifier: Override the identifier from the share
+        metadata.  Only needed for non-extendable ERA-reworked shares where
+        the identifier changed.  Irrelevant for extendable shares.
+    :param original_extendable: Override the extendable flag.  Needed when
+        the original shares were extendable but ERA's Bug 2 changed the
+        stored flag to False.
+    :param original_iteration_exponent: Override the iteration exponent.
+        Needed when ERA changed it during import (e.g. original Trezor
+        used ie=1 but ERA stored ie=0).  The original value is visible
+        in the original Trezor share metadata.
+    :return: An :class:`EraRecoveryResult` with the recovered secrets.
+    """
+    # Step 1: Recover the EMS from the ERA shares.
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    # Step 2: Decrypt with empty passphrase to get the default master secret.
+    # ERA's Feistel round-trip guarantees this is correct.
+    ms_default = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    # Step 3: Determine the original SLIP39 parameters.
+    orig_id = original_identifier if original_identifier is not None else ems.identifier
+    orig_ext = (
+        original_extendable if original_extendable is not None else ems.extendable
+    )
+    orig_ie = (
+        original_iteration_exponent
+        if original_iteration_exponent is not None
+        else ems.iteration_exponent
+    )
+
+    # Step 4: Reconstruct the original EMS by re-encrypting ms_default with
+    # the original parameters.  This reverses ERA's buggy decrypt.
+    recovered_ems = cipher.encrypt(ms_default, b"", orig_ie, orig_id, orig_ext)
+
+    # Step 5: Decrypt with the user's passphrase to recover the passphrase
+    # wallet.
+    recovered_pp_secret = cipher.decrypt(
+        recovered_ems, passphrase, orig_ie, orig_id, orig_ext
+    )
+
+    return EraRecoveryResult(
+        default_master_secret=ms_default,
+        recovered_ems=recovered_ems,
+        recovered_passphrase_secret=recovered_pp_secret,
+    )
+
+
+def recover_from_era_shares_brute_force_id(
+    mnemonics: Iterable[str],
+    passphrase: bytes,
+    verify_ms: bytes,
+    original_extendable: bool = False,
+    original_iteration_exponent: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> Optional[Tuple[EraRecoveryResult, int]]:
+    """Brute-force the original identifier for non-extendable ERA recovery.
+
+    For **non-extendable** shares where ERA reworked with a different
+    identifier, the original identifier is needed for recovery because
+    the identifier is part of the Feistel cipher salt.
+
+    If the user doesn't know the original identifier (e.g. lost the
+    original Trezor shares), this function tries all 32768 possible
+    identifiers (15-bit space) until it finds one that produces the
+    expected passphrase master secret.
+
+    :param mnemonics: ERA-mangled mnemonic shares (enough to meet threshold).
+    :param passphrase: The user's original passphrase.
+    :param verify_ms: Expected passphrase master secret to verify against.
+        This is needed to know when the correct identifier is found.
+    :param original_extendable: Original extendable flag (typically False
+        for non-extendable shares).
+    :param original_iteration_exponent: Override the iteration exponent.
+        If None, uses the value from the ERA shares.
+    :param progress_callback: Optional callback ``f(current, total)``
+        called after each identifier attempt for progress reporting.
+    :return: ``(EraRecoveryResult, found_identifier)`` if found, else None.
+    """
+    groups = decode_mnemonics(mnemonics)
+    ems = recover_ems(groups)
+
+    ms_default = cipher.decrypt(
+        ems.ciphertext, b"", ems.iteration_exponent, ems.identifier, ems.extendable
+    )
+
+    orig_ie = (
+        original_iteration_exponent
+        if original_iteration_exponent is not None
+        else ems.iteration_exponent
+    )
+
+    total = 1 << ID_LENGTH_BITS  # 32768
+
+    for candidate_id in range(total):
+        if progress_callback is not None:
+            progress_callback(candidate_id, total)
+
+        recovered_ems = cipher.encrypt(
+            ms_default, b"", orig_ie, candidate_id, original_extendable
+        )
+        recovered_ms = cipher.decrypt(
+            recovered_ems, passphrase, orig_ie, candidate_id, original_extendable
+        )
+
+        if recovered_ms == verify_ms:
+            return (
+                EraRecoveryResult(
+                    default_master_secret=ms_default,
+                    recovered_ems=recovered_ems,
+                    recovered_passphrase_secret=recovered_ms,
+                ),
+                candidate_id,
+            )
+
+    return None

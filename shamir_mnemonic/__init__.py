@@ -3,11 +3,19 @@
 from .cipher import decrypt, encrypt
 from .shamir import (
     EncryptedMasterSecret,
+    EraImportResult,
+    EraRecoveryResult,
+    EraReworkResult,
     combine_mnemonics,
     decode_mnemonics,
     generate_mnemonics,
     recover_ems,
+    recover_from_era_shares,
+    recover_from_era_shares_brute_force_id,
+    simulate_era_import,
+    simulate_era_rework,
     split_ems,
+    verify_mnemonics,
 )
 from .share import Share
 from .utils import MnemonicError
@@ -20,7 +28,15 @@ __all__ = [
     "generate_mnemonics",
     "split_ems",
     "recover_ems",
+    "verify_mnemonics",
+    "simulate_era_import",
+    "simulate_era_rework",
+    "recover_from_era_shares",
+    "recover_from_era_shares_brute_force_id",
     "EncryptedMasterSecret",
+    "EraImportResult",
+    "EraRecoveryResult",
+    "EraReworkResult",
     "MnemonicError",
     "Share",
 ]
