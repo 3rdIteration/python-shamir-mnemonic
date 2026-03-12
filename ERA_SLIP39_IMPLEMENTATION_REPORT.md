@@ -22,9 +22,11 @@ incompatible with both the **older non-extendable SLIP39 standard** and the
 only fully compatible with other ERA wallet instances running the same code.
 
 The impact ranges from **silently wrong addresses** (user sees different
-addresses than their hardware wallet) to **permanent, unrecoverable fund loss**
-(user discards original shares, keeps only ERA-regenerated shares, and the
-passphrase-protected wallet becomes permanently inaccessible).
+addresses than their hardware wallet) to **apparent fund loss** when a user
+discards original shares and keeps only ERA-regenerated shares.  However,
+**recovery is possible**: because ERA preserves the correct no-passphrase
+master secret, the passphrase wallet can be mathematically reconstructed
+from ERA-mangled shares — see [Section 10](#10-recovery-getting-your-passphrase-wallet-back).
 
 ---
 
@@ -288,7 +290,7 @@ than the Trezor.
 on the Trezor.  No funds are lost **as long as the original shares are
 preserved**.
 
-### Scenario B: Default Works, Passphrase Breaks, Fund Loss
+### Scenario B: Default Works, Passphrase Breaks — But Is Recoverable
 
 A user reported:
 
@@ -299,6 +301,9 @@ A user reported:
 > created. [...] if the user only retained the ERA-regenerated shares
 > AND used a passphrase, the funds would be unrecoverably lost."
 
+**Update:** Subsequent analysis showed that **recovery IS possible** even
+from ERA-mangled shares.  See [Section 10](#10-recovery-getting-your-passphrase-wallet-back) for the full procedure.
+
 **Root cause:** The Trezor creates shares **without a passphrase during
 share generation** (passphrase is only applied during seed derivation).
 ERA imports the shares and the default wallet matches because Bug 1 is
@@ -306,7 +311,7 @@ a no-op when there's no passphrase.  But when the user enables a
 passphrase on the Trezor, ERA's Bug 2 means the passphrase-derived
 seed is wrong (for extendable shares, the salt is different).
 
-**Catastrophic path to fund loss:**
+**Apparent path to fund loss (actually recoverable):**
 
 ```
 Step 1: User creates SLIP39 backup on Trezor (extendable, no passphrase)
@@ -315,7 +320,9 @@ Step 2: User imports shares into ERA → default address matches ✓
 Step 3: User enables passphrase on Trezor → ERA shows WRONG addresses ✗
 Step 4: ERA regenerates/reworks shares → new shares encode WRONG data
 Step 5: User discards original Trezor shares, keeps only ERA shares
-Step 6: User tries to recover passphrase wallet from ERA shares → FUND LOSS
+Step 6: User tries to recover passphrase wallet from ERA shares → WRONG ADDRESSES
+Step 7: ✅ RECOVERY: Use recover_from_era_shares() — passphrase wallet IS recoverable
+        (ERA preserved the correct default master secret; see Section 10)
 ```
 
 ### Scenario C: Non-Extendable Trezor Seed
@@ -724,7 +731,7 @@ Key tests:
 | `test_era_silently_accepts_all_trezor_share_types` | ERA never rejects any import |
 | `test_era_import_acceptance_vs_correctness_matrix` | Complete compatibility matrix |
 | `test_trezor_safe_7_with_passphrase_era_gives_different_addresses` | Confirmed real-world Safe 7 scenario |
-| `test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost` | Confirmed fund loss scenario |
+| `test_confirmed_fault_default_works_but_passphrase_breaks_and_funds_lost` | Confirmed fault scenario (passphrase breaks; recoverable via Section 10) |
 | `test_trezor_nonextendable_seed_imported_to_era_with_passphrase` | Non-extendable shares: partial safety |
 | `test_era_native_shares_imported_to_trezor_with_passphrase_is_safe` | ERA→Trezor direction: safe for native shares |
 | `test_era_reworked_shares_imported_to_trezor_with_passphrase_both_wrong` | ERA→Trezor direction: corrupted for reworked shares |
