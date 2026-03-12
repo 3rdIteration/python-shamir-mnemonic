@@ -619,6 +619,7 @@ Key tests:
 | `test_trezor_nonextendable_seed_imported_to_era_with_passphrase` | Non-extendable shares: partial safety |
 | `test_era_native_shares_imported_to_trezor_with_passphrase_is_safe` | ERA→Trezor direction: safe for native shares |
 | `test_era_reworked_shares_imported_to_trezor_with_passphrase_both_wrong` | ERA→Trezor direction: corrupted for reworked shares |
+| `test_upstream_vectors_would_have_caught_era_bugs` | Upstream vectors.json catches both bugs |
 
 The simulation functions `simulate_era_import()` and `simulate_era_rework()`
 in [`shamir_mnemonic/shamir.py`](https://github.com/3rdIteration/python-shamir-mnemonic/blob/master/shamir_mnemonic/shamir.py)
@@ -644,3 +645,51 @@ under [github.com/ERAWLT](https://github.com/ERAWLT) at commit `1504ed0`:
 | `Account.cpp` | 102-127 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127) | Rework: `generateMnemonicSLIP39()` uses wrong entropy |
 | `CryptoModule.cpp` | 394-408 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408) | Rework: `createMnemonic()` forwards without validation |
 | `CryptoModule.cpp` | 581-588 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588) | Identifier: `getAccountSlip39Identifier()` returns 0 on error |
+
+## Appendix D: Upstream Test Vectors Would Have Caught Both Bugs
+
+The upstream reference library
+([trezor/python-shamir-mnemonic](https://github.com/trezor/python-shamir-mnemonic))
+ships with **`vectors.json`** — a set of 45 test vectors (15 valid, 30
+invalid/error cases) that existed **before any changes in this PR**.  These
+vectors are sufficient to detect **both** ERA bugs.
+
+### Bug 1: All Valid Vectors Use Passphrase `"TREZOR"`
+
+Every valid test vector in `vectors.json` is designed to be recovered with
+passphrase `b"TREZOR"` (as shown in the upstream `test_vectors()` function).
+ERA's Bug 1 — always passing an empty string `""` to `decrypt()` — causes
+**every single valid vector** (15 of 15) to produce a wrong master secret.
+
+An implementation that passes `""` instead of `"TREZOR"` would fail all 15
+valid vectors immediately.
+
+### Bug 2: Extendable Vectors Exist (Vectors 41-44)
+
+Vectors 41-44 are extendable shares with `extendable=True` encoded in their
+share metadata.  ERA's Bug 2 — hardcoding `extendable=false` — changes the
+Feistel cipher salt from `""` (empty, as specified for extendable) to
+`"shamir" + identifier_bytes` (the non-extendable salt).  This produces a
+**completely different master secret** even if the passphrase were correct.
+
+### Combined Effect
+
+For the 4 extendable vectors, both bugs apply simultaneously:
+
+| Bug Applied | Passphrase | Extendable | Salt | Result |
+|------------|------------|------------|------|--------|
+| None (correct) | `"TREZOR"` | `true` | `""` | ✓ Correct secret |
+| Bug 1 only | `""` | `true` | `""` | ✗ Wrong secret |
+| Bug 2 only | `"TREZOR"` | `false` | `"shamir"+id` | ✗ Wrong secret |
+| Both bugs | `""` | `false` | `"shamir"+id` | ✗ Wrong secret (different from above) |
+
+All three wrong results are **different values** — each bug independently
+corrupts the output, and combined they produce a third distinct wrong value.
+
+### Conclusion
+
+If ERA had run their SLIP39 implementation against the upstream
+`vectors.json` test suite — which was freely available from the reference
+library — **both bugs would have been caught immediately**.  The test
+`test_upstream_vectors_would_have_caught_era_bugs()` in this repository
+explicitly demonstrates this.

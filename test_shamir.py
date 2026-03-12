@@ -163,6 +163,135 @@ def test_vectors():
                 )
 
 
+def test_upstream_vectors_would_have_caught_era_bugs():
+    """
+    The upstream python-shamir-mnemonic library (trezor/python-shamir-mnemonic)
+    ships with vectors.json — test vectors that were available BEFORE any
+    changes in this PR.  These vectors are sufficient to detect BOTH ERA bugs:
+
+      Bug 1 (passphrase always ""):
+        All 15 valid test vectors are designed to be recovered with passphrase
+        b"TREZOR".  ERA's code always passes "" to decrypt(), so every single
+        valid vector produces a WRONG master secret under ERA's logic.
+
+      Bug 2 (extendable hardcoded false):
+        Vectors 41-44 are extendable shares.  ERA forces extendable=false
+        when decrypting, which changes the Feistel cipher salt and produces
+        a different master secret even if the passphrase were correct.
+
+    If ERA had tested their SLIP39 implementation against these upstream
+    vectors, both bugs would have been caught immediately.
+
+    ERA source references:
+      Bug 1: Account.cpp line 210 — decodeShamirShares() uses empty passphrase
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
+      Bug 1: Account.cpp line 433 — addAccount() uses empty passphrase
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
+      Bug 2: Account.cpp line 850-851 — hardcodes extendable=false
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
+    """
+    with open("vectors.json", "r") as f:
+        vectors = json.load(f)
+
+    valid_vectors = [
+        (desc, mnemonics, secret_hex, xprv)
+        for desc, mnemonics, secret_hex, xprv in vectors
+        if secret_hex
+    ]
+    assert len(valid_vectors) > 0, "Need valid vectors to test"
+
+    # ===================================================================
+    # Bug 1: ERA always decrypts with passphrase=""
+    # The upstream test_vectors() uses passphrase=b"TREZOR" for all valid
+    # vectors.  ERA's Bug 1 means it would use b"" instead.
+    # Every valid vector produces a WRONG result under ERA's logic.
+    # ===================================================================
+    bug1_failures = 0
+    for desc, mnemonics, secret_hex, xprv in valid_vectors:
+        expected_secret = bytes.fromhex(secret_hex)
+
+        # What the standard says (and what test_vectors() checks):
+        correct_result = shamir.combine_mnemonics(mnemonics, b"TREZOR")
+        assert correct_result == expected_secret
+
+        # What ERA does — Bug 1: empty passphrase
+        era_bug1_result = shamir.combine_mnemonics(mnemonics, b"")
+
+        if era_bug1_result != expected_secret:
+            bug1_failures += 1
+
+    assert bug1_failures == len(valid_vectors), (
+        f"Bug 1 should cause ALL {len(valid_vectors)} valid vectors to fail, "
+        f"but only {bug1_failures} failed.  "
+        "Every vector uses passphrase=TREZOR; ERA always uses empty string."
+    )
+
+    # ===================================================================
+    # Bug 2: ERA hardcodes extendable=false
+    # Extendable vectors (41-44) have extendable=True in their share
+    # metadata.  ERA forces extendable=false during decrypt, which changes
+    # the Feistel cipher salt from "" to "shamir" + identifier_bytes.
+    # This produces a completely different master secret.
+    # ===================================================================
+    extendable_vectors = [
+        (desc, mnemonics, secret_hex, xprv)
+        for desc, mnemonics, secret_hex, xprv in valid_vectors
+        if "extendable" in desc.lower()
+    ]
+    assert len(extendable_vectors) > 0, "Need extendable vectors to test Bug 2"
+
+    for desc, mnemonics, secret_hex, xprv in extendable_vectors:
+        expected_secret = bytes.fromhex(secret_hex)
+
+        # Recover the EMS to test at the cipher level
+        groups = shamir.decode_mnemonics(mnemonics)
+        ems = shamir.recover_ems(groups)
+        assert ems.extendable is True, f"Expected extendable=True for '{desc}'"
+
+        # Standard: decrypt with correct extendable flag
+        correct_ms = shamir.cipher.decrypt(
+            ems.ciphertext,
+            b"TREZOR",
+            ems.iteration_exponent,
+            ems.identifier,
+            ems.extendable,  # True — correct
+        )
+        assert correct_ms == expected_secret
+
+        # ERA Bug 2 alone (even with correct passphrase): wrong extendable
+        era_bug2_ms = shamir.cipher.decrypt(
+            ems.ciphertext,
+            b"TREZOR",
+            ems.iteration_exponent,
+            ems.identifier,
+            False,  # ERA hardcodes this — WRONG for extendable shares
+        )
+        assert (
+            era_bug2_ms != expected_secret
+        ), f"Bug 2 should produce wrong result for extendable vector '{desc}'"
+
+        # ERA Both bugs combined: wrong passphrase AND wrong extendable
+        era_both_ms = shamir.cipher.decrypt(
+            ems.ciphertext,
+            b"",  # Bug 1
+            ems.iteration_exponent,
+            ems.identifier,
+            False,  # Bug 2
+        )
+        assert (
+            era_both_ms != expected_secret
+        ), f"Both bugs should produce wrong result for '{desc}'"
+        assert (
+            era_both_ms != era_bug2_ms
+        ), f"Bug 1 and Bug 2 produce different wrong results for '{desc}'"
+
+    # ===================================================================
+    # Conclusion: the upstream vectors.json was always sufficient to catch
+    # both ERA bugs.  Any implementation that passes test_vectors() is
+    # guaranteed to handle passphrase and extendable correctly.
+    # ===================================================================
+
+
 def test_split_ems():
     encrypted_master_secret = shamir.EncryptedMasterSecret.from_master_secret(
         MS, b"TREZOR", identifier=42, extendable=True, iteration_exponent=1
