@@ -471,11 +471,14 @@ def test_rework_passphrase_protected_shares_without_passphrase():
 # (ERAWLT/ERA-crypto-p) to demonstrate concrete scenarios where ERA displays
 # incorrect addresses or generates non-standard SLIP39 backups.
 #
-# ERA wallet bug references (Account.cpp, ShamirCipher.cpp):
+# ERA wallet bug references:
 #   Bug 1: decodeShamirShares() / addAccount() always call
 #          encryptedMasterSecret.decrypt("") — ignoring the user passphrase.
+#          https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
+#          https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
 #   Bug 2: Account constructor always re-encrypts with extendable=false
 #          via EncryptedMasterSecret::fromMasterSecret(entropy, "", id, false, ie).
+#          https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
 # ---------------------------------------------------------------------------
 
 
@@ -972,7 +975,9 @@ def test_era_no_block_scenario_2_passphrase_ignored_during_import():
 
     ERA wallet code path (Account.cpp):
       - decodeShamirShares():  encryptedMasterSecret.decrypt({})  [line 210]
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
       - addAccount():          encryptedMasterSecret.decrypt("")   [line 433]
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
 
     Both ALWAYS use empty passphrase, regardless of what the user entered.
     There is no validation, no prompt, no warning.  The passphrase parameter
@@ -1058,7 +1063,8 @@ def test_era_no_block_scenario_4_rework_with_new_identifier():
     round-trip breaks because the salt changes.
 
     ERA wallet code path:
-      CryptoModule::getAccountSlip39Identifier() [CryptoModule.cpp:588]:
+      CryptoModule::getAccountSlip39Identifier() [CryptoModule.cpp:581-588]:
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588
         auto account = _getActiveAccount({});
         if (!account) { return 0; }          // ← Returns 0 if no session!
         return account->getSlip39Identifier();
@@ -1377,7 +1383,8 @@ def test_trezor_correct_passphrase_handling():
             render_func,
         )
 
-    ERA wallet reference (Account.cpp):
+    ERA wallet reference (Account.cpp line 210):
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
         auto ms = encryptedMasterSecret.decrypt({});  # ← ALWAYS empty passphrase
 
     This test proves Trezor's implementation is the reference standard:
@@ -1496,7 +1503,8 @@ def test_trezor_current_extendable_with_passphrase_era_vulnerability():
             identifier = slip39.generate_random_identifier()
         # ↑ Extendable shares get fresh random identifier each backup
 
-    ERA wallet bug reference (Account.cpp:851):
+    ERA wallet bug reference (Account.cpp line 850-851):
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
       auto ems = common::shamir::EncryptedMasterSecret::fromMasterSecret(
           entropy, "", id, false, ie);
       # ↑ ALWAYS uses extendable=false, even for extendable shares

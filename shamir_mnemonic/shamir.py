@@ -562,11 +562,14 @@ class EraImportResult:
       ``decodeShamirShares()`` and ``addAccount()`` always call
       ``encryptedMasterSecret.decrypt("")`` regardless of any user passphrase,
       so the stored "entropy" is wrong for passphrase-protected shares.
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
 
     Bug 2 — extendable flag hardcoded False during re-encryption:
       The ``Account`` constructor always calls
       ``EncryptedMasterSecret::fromMasterSecret(entropy, "", id, false, ie)``
       with ``extendable=false`` when re-encrypting for storage.
+      https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
 
     Due to the Feistel cipher round-trip property
     ``encrypt(decrypt(ct, S), S) = ct``, when the same (empty) passphrase and
@@ -608,7 +611,9 @@ def simulate_era_import(
     """Simulate ERA wallet's SLIP39 import path and return diagnostic info.
 
     This function models the exact code path in the ERA wallet
-    (``ERAWLT/ERA-crypto-p``, ``Account.cpp``) when SLIP39 shares are imported:
+    (``ERAWLT/ERA-crypto-p``,
+    `Account.cpp <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp>`_)
+    when SLIP39 shares are imported:
 
     1. ``decodeShamirShares`` / ``addAccount`` recover the EMS from shares.
     2. ERA decrypts the EMS with an **empty** passphrase (Bug 1) to obtain
@@ -742,12 +747,14 @@ def simulate_era_rework(
     **ERA has NO code to block this rework path for passphrase-protected shares.**
     Specifically:
 
-    - ``generateMnemonicSLIP39`` (Account.cpp:102-127) takes entropy and
+    - `generateMnemonicSLIP39 <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127>`_
+      (Account.cpp:102-127) takes entropy and
       identifier as parameters and calls ``generateMnemonics`` with
       ``extendable=false`` and an **empty passphrase** unconditionally.
     - There is no check for whether the entropy was originally passphrase-protected.
     - There is no warning or error when reworking passphrase-protected shares.
-    - The ``createMnemonic`` API (CryptoModule.cpp:396-410) simply forwards
+    - The `createMnemonic <https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408>`_
+      API (CryptoModule.cpp:394-408) simply forwards
       parameters without validation.
 
     :param mnemonics: Original SLIP39 mnemonic shares.

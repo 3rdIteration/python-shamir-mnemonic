@@ -2,8 +2,8 @@
 
 ## Analysis of SLIP39 Bugs in the ERA Wallet (ERAWLT)
 
-**Repository analysed:** [github.com/ERAWLT](https://github.com/ERAWLT)
-(specifically `ERA-crypto-p`: `Account.cpp`, `CryptoModule.cpp`, `ShamirCipher.cpp`)
+**Repository analysed:** [`ERAWLT/ERA-crypto-p`](https://github.com/ERAWLT/ERA-crypto-p/tree/1504ed05ae4cc90128e679f48afc2a6de6fb963a)
+(specifically [`Account.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp) and [`CryptoModule.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp))
 
 **Date:** March 2026
 
@@ -115,21 +115,23 @@ cryptocurrency addresses.
 
 ### Bug 1: Passphrase Ignored During Import
 
-**Location:** `Account.cpp` lines ~210, ~433
+**Location:** `Account.cpp` — [`decodeShamirShares()` line 210](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210) and [`addAccount()` line 433](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433)
 
 When ERA imports SLIP39 shares, it recovers the EMS correctly via Shamir's
 Secret Sharing.  However, it then **always decrypts the EMS with an empty
 passphrase**, regardless of any passphrase the user may have set:
 
 ```cpp
-// Account.cpp — decodeShamirShares()
-auto masterSecret = encryptedMasterSecret.decrypt("");   // line ~210
-//                                                  ^^
+// Account.cpp — decodeShamirShares() line 210
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
+auto masterSecret = encryptedMasterSecret.decrypt({});
+//                                                ^^
 //                           Always empty — user passphrase is IGNORED
 
-// Account.cpp — addAccount()
-auto masterSecret = encryptedMasterSecret.decrypt("");   // line ~433
-//                                                  ^^
+// Account.cpp — addAccount() line 433
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433
+auto masterSecret = encryptedMasterSecret.decrypt("");
+//                                                ^^
 //                           Same bug — passphrase parameter never forwarded
 ```
 
@@ -143,14 +145,15 @@ is the result of decrypting the EMS with an empty passphrase — which is
 
 ### Bug 2: Extendable Flag Hardcoded to `false`
 
-**Location:** `Account.cpp` line ~851
+**Location:** [`Account.cpp` line 851](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L851)
 
 When ERA re-encrypts the (potentially wrong) entropy for internal storage,
 it **always uses `extendable=false`**, regardless of whether the imported
 shares were extendable or not:
 
 ```cpp
-// Account.cpp — Account constructor
+// Account.cpp — Account constructor, line 850-851
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851
 auto ems = EncryptedMasterSecret::fromMasterSecret(
     entropy, "", identifier, false, iterationExponent
 );
@@ -385,7 +388,8 @@ ERA wallet offers the ability to regenerate SLIP39 shares from stored account
 data.  This "rework" path follows:
 
 ```cpp
-// CryptoModule::createMnemonic → AccountsManager::generateMnemonicSLIP39
+// CryptoModule::createMnemonic (line 394) → AccountsManager::generateMnemonicSLIP39 (line 102)
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L113-L114
 generateMnemonics(1, groups, entropy, "", identifier, false, iterationExponent)
 //                            ^^^^^^^  ^^              ^^^^^
 //                            Bug 1    Bug 1           Bug 2
@@ -398,11 +402,11 @@ generateMnemonics(1, groups, entropy, "", identifier, false, iterationExponent)
 
 ERA has **no code** to prevent rework of passphrase-protected shares:
 
-- `generateMnemonicSLIP39` (Account.cpp lines 102-127) takes entropy and
+- [`generateMnemonicSLIP39` (Account.cpp lines 102-127)](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127) takes entropy and
   identifier as parameters without validation
 - There is **no check** for whether the entropy was originally passphrase-protected
 - There is **no warning** when reworking potentially corrupted data
-- The `createMnemonic` API (CryptoModule.cpp lines 396-410) forwards
+- The [`createMnemonic` API (CryptoModule.cpp lines 394-408)](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408) forwards
   parameters without validation
 
 ### The Identifier Problem
@@ -410,7 +414,8 @@ ERA has **no code** to prevent rework of passphrase-protected shares:
 The identifier for rework comes from `getAccountSlip39Identifier()`:
 
 ```cpp
-// CryptoModule.cpp line 588
+// CryptoModule.cpp line 581-588
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588
 int CryptoModule::getAccountSlip39Identifier() {
     auto account = _getActiveAccount({});
     if (!account) { return 0; }           // ← Returns 0 if no active session!
@@ -480,8 +485,8 @@ from what any standard-compliant implementation would produce.
 User imports SLIP39 shares into ERA wallet
     │
     ▼
-decodeShamirShares(shares, "")     ← Account.cpp line ~210
-    │                         ^^
+decodeShamirShares(shares, "")     ← Account.cpp line 210
+    │                         ^^       https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210
     │           Passphrase ALWAYS empty (Bug 1)
     │
     ▼
@@ -529,7 +534,8 @@ BIP32 key derivation → addresses
 User requests share regeneration
     │
     ▼
-CryptoModule::createMnemonic()     ← CryptoModule.cpp line ~396
+CryptoModule::createMnemonic()     ← CryptoModule.cpp line 394
+    │                                  https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394
     │
     ▼
 getAccountSlip39Identifier()       ← May return 0 if no active session!
@@ -617,7 +623,7 @@ Key tests:
 The simulation functions `simulate_era_import()` and `simulate_era_rework()`
 in [`shamir_mnemonic/shamir.py`](https://github.com/3rdIteration/python-shamir-mnemonic/blob/master/shamir_mnemonic/shamir.py)
 model ERA's exact code paths, with inline references to the ERA C++ source
-(Account.cpp lines, CryptoModule.cpp lines).
+([`Account.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp), [`CryptoModule.cpp`](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp)).
 
 ## Appendix B: Standard SLIP39 References
 
@@ -627,14 +633,14 @@ model ERA's exact code paths, with inline references to the ERA C++ source
 
 ## Appendix C: ERA Wallet Source References
 
-All ERA code references in this report point to the `ERA-crypto-p` repository
-under [github.com/ERAWLT](https://github.com/ERAWLT):
+All ERA code references in this report point to the [`ERA-crypto-p` repository](https://github.com/ERAWLT/ERA-crypto-p/tree/1504ed05ae4cc90128e679f48afc2a6de6fb963a)
+under [github.com/ERAWLT](https://github.com/ERAWLT) at commit `1504ed0`:
 
-| File | Lines | Bug |
-|------|-------|-----|
-| `Account.cpp` | ~210 | Bug 1: `decodeShamirShares()` uses empty passphrase |
-| `Account.cpp` | ~433 | Bug 1: `addAccount()` uses empty passphrase |
-| `Account.cpp` | ~851 | Bug 2: Account constructor hardcodes `extendable=false` |
-| `Account.cpp` | 102-127 | Rework: `generateMnemonicSLIP39()` uses wrong entropy |
-| `CryptoModule.cpp` | 396-410 | Rework: `createMnemonic()` forwards without validation |
-| `CryptoModule.cpp` | 588-598 | Identifier: `getAccountSlip39Identifier()` returns 0 on error |
+| File | Lines | Link | Bug |
+|------|-------|------|-----|
+| `Account.cpp` | 210 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L210) | Bug 1: `decodeShamirShares()` uses empty passphrase |
+| `Account.cpp` | 433 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L433) | Bug 1: `addAccount()` uses empty passphrase |
+| `Account.cpp` | 850-851 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851) | Bug 2: Account constructor hardcodes `extendable=false` |
+| `Account.cpp` | 102-127 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127) | Rework: `generateMnemonicSLIP39()` uses wrong entropy |
+| `CryptoModule.cpp` | 394-408 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408) | Rework: `createMnemonic()` forwards without validation |
+| `CryptoModule.cpp` | 581-588 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588) | Identifier: `getAccountSlip39Identifier()` returns 0 on error |
