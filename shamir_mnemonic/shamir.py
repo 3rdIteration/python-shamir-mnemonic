@@ -742,8 +742,13 @@ def simulate_era_rework(
     during import by decrypting the EMS with an empty passphrase (Bug 1).
 
     The identifier comes from ``CryptoModule::getAccountSlip39Identifier()``,
-    which reads ``AccountSecureData::slip39Id``.  However, if the active
-    account session is not available, it returns **0** — a different value.
+    which reads ``AccountSecureData::slip39Id`` via the cached active account.
+    In normal operation, the active account is always cached and returns the
+    **original identifier** from the imported shares.  The ``return 0``
+    fallback in ``getAccountSlip39Identifier()`` is a defensive null check
+    that only triggers when no active account is available (login failure,
+    account locked, or secure storage error) — states where backup rework
+    is impossible anyway.
 
     **ERA has NO code to block this rework path for passphrase-protected shares.**
     Specifically:
@@ -762,8 +767,9 @@ def simulate_era_rework(
     :param passphrase: The original passphrase used to create the shares.
     :param rework_groups: The new group scheme for reworked shares.
     :param new_identifier: If set, use this identifier for rework (simulates
-        the case where ``getAccountSlip39Identifier()`` returns a different
-        value, e.g. 0).  If None, use the original identifier.
+        the hypothetical case where ``getAccountSlip39Identifier()`` returns a
+        different value, e.g. 0).  If None, use the original identifier — this
+        is what happens in normal ERA operation.
     :return: An :class:`EraReworkResult` with diagnostic info.
     """
     # Step 1: Import into ERA (to get the stored entropy).

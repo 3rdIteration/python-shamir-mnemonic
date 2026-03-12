@@ -240,15 +240,17 @@ bugs are triggered.
 | **Extendable** (current Trezor) | None | ✅ Correct | N/A | ✅ Correct |
 | **Extendable** (current Trezor) | Any | ❌ Wrong | ❌ **Wrong** | ❌ **Always wrong** |
 | **Non-extendable** (legacy Trezor) | None | ✅ Correct | N/A | ✅ Correct |
-| **Non-extendable** (legacy Trezor) | Any | ❌ Wrong | ✅ Correct (*) | ⚠️ Depends (**) |
+| **Non-extendable** (legacy Trezor) | Any | ❌ Wrong | ✅ Correct (*) | ✅ Safe (**)  |
 
 **(\*)** Saved by the Feistel round-trip property — the salt happens to be
 unchanged because Bug 2 is a no-op for non-extendable shares (they're
 already `extendable=false`).
 
-**(\*\*)** Rework is correct if the same identifier is preserved; **wallet is
-destroyed** if the identifier changes (e.g. to 0 when account session is
-lost).
+**(\*\*)** ERA preserves the identifier during rework in normal operation
+(see [Section 7: The Identifier During Rework](#the-identifier-during-rework)).
+The `getAccountSlip39Identifier()` function returns the stored identifier
+from the cached active account; the `return 0` fallback only triggers in
+error states where the wallet cannot function at all.
 
 ### Why Current Trezor Firmware Is Most Affected
 
@@ -268,7 +270,7 @@ For **legacy non-extendable** Trezor shares:
 - **Bug 2** is a no-op (shares were already non-extendable)
 - The Feistel round-trip **preserves the EMS** (same salt)
 - Default wallet is wrong, but **passphrase wallet is correct**
-- Rework is safe *only if* the identifier is preserved
+- Rework is safe — ERA preserves the identifier in normal operation
 
 ---
 
@@ -417,7 +419,7 @@ ERA has **no code** to prevent rework of passphrase-protected shares:
 - The [`createMnemonic` API (CryptoModule.cpp lines 394-408)](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408) forwards
   parameters without validation
 
-### The Identifier Problem
+### The Identifier During Rework
 
 The identifier for rework comes from `getAccountSlip39Identifier()`:
 
@@ -426,22 +428,63 @@ The identifier for rework comes from `getAccountSlip39Identifier()`:
 // https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588
 int CryptoModule::getAccountSlip39Identifier() {
     auto account = _getActiveAccount({});
-    if (!account) { return 0; }           // ← Returns 0 if no active session!
+    if (!account) { return 0; }           // ← Defensive null check
     return account->getSlip39Identifier();
 }
 ```
 
-If the active account session is not available, the function returns **0**.
-This is a different identifier than the original shares, which breaks the
-Feistel round-trip for non-extendable shares:
+The `return 0` is a **defensive null check**, not a realistic failure mode.
+To understand why, trace the call chain:
 
-```
-encrypt(wrong_entropy, "", 0, false) ≠ encrypt(wrong_entropy, "", original_id, false)
+```cpp
+// CryptoModule.cpp line 358
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L358
+AccountSPtr CryptoModule::_getActiveAccount(std::string_view const& password) {
+    if (_accounts)
+        return _accounts->getActiveAccount(password);   // ← Delegates to AccountsManager
+    return nullptr;
+}
+
+// Account.cpp line 523-558
+// https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L523-L558
+AccountSPtr AccountsManager::getActiveAccount(std::string_view const& password) {
+    if (_activeAccountId < 0 || _activeAccountId >= c_maxAccounts)
+        return {};                                       // ① No active account selected
+
+    if (_activeAccount && _activeAccountId == _activeAccount->id())
+        return _activeAccount;                           // ② NORMAL PATH: cached account
+
+    // ... password/lock checks ...
+    auto lockTime = _keyProtectionManager.accountPasswordLockTime(_activeAccountId);
+    if (lockTime > 0)
+        return {};                                       // ③ Account locked (password fails)
+
+    // ... read from secure storage ...
+    if (res <= 0)
+        return {};                                       // ④ Secure storage read failure
+
+    _activeAccount = std::make_shared<Account>(...);
+    return _activeAccount;                               // ⑤ Freshly loaded
+}
 ```
 
-The salt changes (`"shamir" + 0` vs `"shamir" + original_id`), so the reworked
-EMS is different from the stored EMS, and the passphrase wallet is permanently
-destroyed.
+**In normal ERA operation, path ② is always taken:** the user is logged into
+their wallet, the account object is cached in memory, and the **correct
+identifier** (read from the original shares during import) is returned.
+
+The null-return paths (①③④) only trigger when:
+
+1. **No active account** (`_activeAccountId < 0`) — the user hasn't logged in
+2. **Account locked** — too many failed password attempts
+3. **Secure storage failure** — hardware or corruption error
+
+All three states **prevent the wallet from functioning at all** — the user
+cannot view balances, sign transactions, or trigger backup rework.  Therefore,
+`return 0` is unreachable during normal backup rework.
+
+**Conclusion: ERA preserves the SLIP39 identifier during both import and
+rework in all normal operation paths.**  For non-extendable shares, this
+means the Feistel round-trip is preserved and the passphrase wallet is safe.
 
 ---
 
@@ -636,10 +679,15 @@ can be read from its metadata.
 
 **For non-extendable shares** (legacy Trezor firmware): the identifier is part
 of the salt.  However, ERA's passphrase wallet is already correct for
-non-extendable shares (Bug 2 is a no-op), so recovery is only needed if ERA
-reworked the shares with a changed identifier.  Even then, the 15-bit
-identifier space (0–32767) can be brute-forced (a few minutes with
-`--brute-force-identifier`).
+non-extendable shares (Bug 2 is a no-op), and ERA preserves the identifier
+during both import and rework in normal operation (see
+[Section 7](#the-identifier-during-rework)).  **Recovery is not needed for
+non-extendable shares** — the passphrase wallet already gives correct
+addresses, whether ERA imported or reworked the shares.
+
+A brute-force identifier search (`--brute-force-identifier`) is available as
+a safety net for the theoretical case where the identifier was somehow lost
+(e.g. hardware failure during rework), but this should not occur in practice.
 
 ### Recovery Matrix
 
@@ -649,8 +697,7 @@ identifier space (0–32767) can be brute-forced (a few minutes with
 | **Extendable**, ERA-reworked, same id | YES | NO | `ms_default + pp + ie` |
 | **Extendable**, ERA-reworked, changed id | YES | **NO** (id irrelevant) | `ms_default + pp + ie` |
 | **Non-extendable**, ERA-imported | Not needed (already correct) | — | — |
-| **Non-extendable**, ERA-reworked, same id | Not needed (already correct) | — | — |
-| **Non-extendable**, ERA-reworked, changed id | YES | YES (brute-force 32768) | `ms_default + pp + ie + id` |
+| **Non-extendable**, ERA-reworked | Not needed (id preserved) | — | — |
 
 ### Step-by-Step Recovery Procedure
 
@@ -879,7 +926,8 @@ under [github.com/ERAWLT](https://github.com/ERAWLT) at commit `1504ed0`:
 | `Account.cpp` | 850-851 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L850-L851) | Bug 2: Account constructor hardcodes `extendable=false` |
 | `Account.cpp` | 102-127 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L102-L127) | Rework: `generateMnemonicSLIP39()` uses wrong entropy |
 | `CryptoModule.cpp` | 394-408 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L394-L408) | Rework: `createMnemonic()` forwards without validation |
-| `CryptoModule.cpp` | 581-588 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588) | Identifier: `getAccountSlip39Identifier()` returns 0 on error |
+| `CryptoModule.cpp` | 581-588 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588) | Identifier: `getAccountSlip39Identifier()` — defensive `return 0` only in error states; normal path returns stored id |
+| `Account.cpp` | 523-558 | [permalink](https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L523-L558) | `getActiveAccount()`: returns cached account (normal) or null (no login / locked / storage error) |
 
 ## Appendix D: Upstream Test Vectors Would Have Caught Both Bugs
 

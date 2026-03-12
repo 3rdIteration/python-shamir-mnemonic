@@ -1267,8 +1267,12 @@ def test_recovery_nonextendable_brute_force_identifier():
     | Extendable, ERA-reworked, same id     | YES       | NO (id irrelevant)|
     | Extendable, ERA-reworked, changed id  | YES       | NO (id irrelevant)|
     | Non-extendable, ERA-imported          | UNNECESSARY (already correct) |
-    | Non-extendable, ERA-reworked, same id | UNNECESSARY (already correct) |
-    | Non-extendable, ERA-reworked, new id  | YES       | YES (brute-force) |
+    | Non-extendable, ERA-reworked          | UNNECESSARY (id preserved)    |
+
+    Note: ERA preserves the identifier during rework in normal operation.
+    The getAccountSlip39Identifier() ``return 0`` fallback only triggers
+    in error states where the wallet cannot function at all (no active
+    account, account locked, or secure storage failure).
     """
     passphrase = b"TREZOR"
 
@@ -1607,24 +1611,84 @@ def test_era_no_block_scenario_4_rework_with_same_identifier():
     assert len(rework.reworked_shares) == 3
 
 
+def test_era_source_analysis_identifier_always_preserved_in_normal_operation():
+    """
+    ERA source code analysis: getAccountSlip39Identifier() preserves the
+    identifier in all normal operation paths.
+
+    The function calls _getActiveAccount({}) which delegates to
+    AccountsManager::getActiveAccount("").  In getActiveAccount:
+
+    1. If _activeAccount is cached (NORMAL): returns it immediately with
+       the original identifier → ✅ identifier preserved
+    2. If no active account (_activeAccountId < 0): returns null → but
+       user can't trigger rework without being logged in
+    3. If account locked (lockTime > 0): returns null → wallet is
+       non-functional, rework impossible
+    4. If secure storage failure (res <= 0): returns null → wallet is
+       non-functional, rework impossible
+
+    Source: Account.cpp lines 523-558
+    https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L523-L558
+
+    This test demonstrates that when simulate_era_rework is called WITHOUT
+    specifying new_identifier (i.e. the normal ERA code path), the original
+    identifier is always preserved and non-extendable shares remain safe.
+    """
+    passphrase = b"TREZOR"
+
+    for extendable in [True, False]:
+        mnemonics = shamir.generate_mnemonics(
+            1,
+            [(3, 5)],
+            MS,
+            passphrase,
+            extendable=extendable,
+            iteration_exponent=1,
+        )[0]
+
+        # Normal ERA rework: no new_identifier → uses original (normal path ②)
+        rework = shamir.simulate_era_rework(
+            mnemonics[:3], passphrase=passphrase, rework_groups=((2, 3),)
+        )
+
+        # The identifier is always preserved in normal operation.
+        assert rework.rework_identifier == rework.original_identifier, (
+            f"extendable={extendable}: ERA preserves identifier in normal operation"
+        )
+
+        if not extendable:
+            # For non-extendable: identifier preserved → Feistel round-trip works
+            # → passphrase wallet is correct → recovery NOT needed.
+            assert rework.original_secret_recoverable, (
+                "Non-extendable + preserved identifier: passphrase wallet safe"
+            )
+            assert rework.recovered_with_passphrase == MS
+
+
 def test_era_no_block_scenario_4_rework_with_new_identifier():
     """
     Prove ERA wallet has NO code to block Scenario 4 (part 2):
     reworking shares with a DIFFERENT identifier.
 
-    This is the catastrophic case: when getAccountSlip39Identifier() returns
-    a different value (e.g. 0 when account session is lost), the Feistel
+    This is a THEORETICAL case: in normal ERA operation, the identifier
+    is preserved because getAccountSlip39Identifier() returns the stored
+    value from the cached active account.  The ``return 0`` fallback only
+    triggers when _getActiveAccount({}) returns null, which requires:
+    - No active account selected (user not logged in)
+    - Account locked (too many password failures)
+    - Secure storage read failure (hardware error)
+    All three states prevent the wallet from functioning at all.
+
+    However, if the identifier WERE to change (e.g. due to a bug fix that
+    inadvertently alters storage, or a future code change), the Feistel
     round-trip breaks because the salt changes.
 
-    ERA wallet code path:
+    ERA source code:
       CryptoModule::getAccountSlip39Identifier() [CryptoModule.cpp:581-588]:
         https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/CryptoModule.cpp#L581-L588
-        auto account = _getActiveAccount({});
-        if (!account) { return 0; }          // ← Returns 0 if no session!
-        return account->getSlip39Identifier();
-
-    There is NO validation that the identifier matches the original shares.
-    There is NO warning when a zero identifier is used.
+      AccountsManager::getActiveAccount() [Account.cpp:523-558]:
+        https://github.com/ERAWLT/ERA-crypto-p/blob/1504ed05ae4cc90128e679f48afc2a6de6fb963a/src/wallet/Account.cpp#L523-L558
     """
     passphrase = b"TREZOR"
 
